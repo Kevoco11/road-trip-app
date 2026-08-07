@@ -681,8 +681,10 @@
         ];
 
         window.addEventListener('DOMContentLoaded', () => {
+            loadState();
             initMap();
             renderMilestones();
+            updateNavBanner();
             renderChecklist();
             renderExpenses();
             initGPSWatcher();
@@ -690,6 +692,11 @@
             setInterval(updateLiveClock, 1000);
             renderCopilotAlerts();
             initTelemetryChart();
+            updateTimerDisplay();
+            const distEl = document.getElementById('live-dist-remaining');
+            if (distEl) distEl.textContent = Math.round(TOTAL_ROUTE_MILES) + ' Mi';
+            const subEl = document.getElementById('trip-status-text');
+            if (subEl) subEl.textContent = 'Pre-Flight Mode • ' + Math.round(TOTAL_ROUTE_MILES) + ' Mi';
             initPWAandServiceWorker();
         });
 
@@ -741,6 +748,941 @@
             }
         }
 
+        // ---------------------------------------------------------------
+        //  Persistence helpers (localStorage) - remembers user edits only.
+        //  NOTE: No telemetry is ever stored or synthesised. All live
+        //  vehicle data comes exclusively from the Veepeak BLE dongle
+        //  (Web Bluetooth) and real device GPS.
+        // ---------------------------------------------------------------
+        const LS_KEYS = { checklist: 'rtc_checklist', expenses: 'rtc_expenses', gemini: 'rtc_gemini_key' };
+
+        function loadState() {
+            try {
+                const c = JSON.parse(localStorage.getItem(LS_KEYS.checklist) || 'null');
+                if (Array.isArray(c)) checklistData = c;
+                const e = JSON.parse(localStorage.getItem(LS_KEYS.expenses) || 'null');
+                if (Array.isArray(e)) expenseList = e;
+            } catch (err) { console.warn('State load skipped:', err); }
+        }
+        function saveChecklist() { localStorage.setItem(LS_KEYS.checklist, JSON.stringify(checklistData)); }
+        function saveExpenses() { localStorage.setItem(LS_KEYS.expenses, JSON.stringify(expenseList)); }
+
+        // ---------------------------------------------------------------
+        //  UI utilities
+        // ---------------------------------------------------------------
+        function showToast(message, kind = 'info') {
+            const colors = {
+                info: 'bg-blue-600', ok: 'bg-emerald-600',
+                warn: 'bg-amber-600', error: 'bg-rose-600'
+            };
+            let host = document.getElementById('toast-host');
+            if (!host) {
+                host = document.createElement('div');
+                host.id = 'toast-host';
+                host.className = 'fixed left-1/2 -translate-x-1/2 bottom-24 z-[999] flex flex-col items-center gap-2 pointer-events-none';
+                document.body.appendChild(host);
+            }
+            const t = document.createElement('div');
+            t.className = `${colors[kind] || colors.info} text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xl max-w-[85vw] text-center opacity-0 translate-y-2 transition-all duration-300`;
+            t.textContent = message;
+            host.appendChild(t);
+            requestAnimationFrame(() => { t.classList.remove('opacity-0', 'translate-y-2'); });
+            setTimeout(() => {
+                t.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => t.remove(), 320);
+            }, 3200);
+        }
+
+        function speak(text) {
+            if (!isVoiceEnabled || !('speechSynthesis' in window)) return;
+            try {
+                const u = new SpeechSynthesisUtterance(text);
+                u.rate = 1.02; u.pitch = 1.0; u.volume = 1.0;
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(u);
+            } catch (err) { /* speech optional */ }
+        }
+
+        function haversineMiles(a, b) {
+            const R = 3958.7613;
+            const toRad = d => d * Math.PI / 180;
+            const dLat = toRad(b.lat - a.lat);
+            const dLng = toRad(b.lng - a.lng);
+            const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+            const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+            return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+        }
+
+        // Cumulative route distance (miles) from start to each routePoint.
+        const routeCumMiles = (() => {
+            const out = [0];
+            for (let i = 1; i < routePoints.length; i++) {
+                out[i] = out[i - 1] + haversineMiles(routePoints[i - 1], routePoints[i]);
+            }
+            return out;
+        })();
+        const TOTAL_ROUTE_MILES = routeCumMiles[routeCumMiles.length - 1];
+
+        // ---------------------------------------------------------------
+        //  Tab navigation
+        // ---------------------------------------------------------------
+        let currentTab = 'nav';
+        const NAV_BTN_IDS = ['nav', 'obd', 'copilot', 'budget', 'prep', 'hud'];
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-content').forEach(sec => sec.classList.add('hidden'));
+            const target = document.getElementById('tab-' + tab);
+            if (target) target.classList.remove('hidden');
+
+            NAV_BTN_IDS.forEach(id => {
+                const btn = document.getElementById('nav-btn-' + id);
+                if (!btn) return;
+                if (id === tab) {
+                    btn.classList.add('text-blue-400');
+                    btn.classList.remove('text-gray-400');
+                } else {
+                    btn.classList.remove('text-blue-400');
+                    btn.classList.add('text-gray-400');
+                }
+            });
+
+            if (tab === 'nav' && map) {
+                setTimeout(() => map.invalidateSize(), 60);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        //  Leaflet map (real route geometry + live GPS marker)
+        // ---------------------------------------------------------------
+        let satLayer = null, streetLayer = null;
+
         function initMap() {
-<!-- ... existing code -->
-     //Fix JS parser bugs and add debug console
+            const center = routePoints[0];
+            map = L.map('nav-map', {
+                zoomControl: false,
+                attributionControl: false,
+                scrollWheelZoom: true
+            }).setView([center.lat, center.lng], 6);
+
+            satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 18
+            });
+            streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19
+            });
+            satLayer.addTo(map);
+
+            const latlngs = routePoints.map(p => [p.lat, p.lng]);
+            mapPolyline = L.polyline(latlngs, {
+                color: '#3b82f6', weight: 5, opacity: 0.85, lineJoin: 'round'
+            }).addTo(map);
+
+            routePoints.forEach((p, i) => {
+                const isStart = i === 0;
+                const isEnd = i === routePoints.length - 1;
+                const color = isStart ? '#3b82f6' : isEnd ? '#10b981' : '#f59e0b';
+                L.circleMarker([p.lat, p.lng], {
+                    radius: isStart || isEnd ? 7 : 5,
+                    color: '#ffffff', weight: 2, fillColor: color, fillOpacity: 1
+                }).addTo(map).bindPopup(`<b>${p.name}</b>`);
+            });
+
+            const vIcon = L.divIcon({
+                className: 'vehicle-marker',
+                html: '<div style="width:18px;height:18px;border-radius:50%;background:#00f0ff;border:3px solid #05080e;box-shadow:0 0 12px #00f0ff,0 0 4px #00f0ff;"></div>',
+                iconSize: [18, 18], iconAnchor: [9, 9]
+            });
+            vehicleMarker = L.marker([center.lat, center.lng], { icon: vIcon, zIndexOffset: 1000 }).addTo(map);
+
+            map.fitBounds(mapPolyline.getBounds(), { padding: [30, 30] });
+        }
+
+        function setMapLayer(type) {
+            if (!map) return;
+            const satBtn = document.getElementById('btn-map-sat');
+            const streetBtn = document.getElementById('btn-map-street');
+            if (type === 'sat') {
+                if (streetLayer && map.hasLayer(streetLayer)) map.removeLayer(streetLayer);
+                if (satLayer && !map.hasLayer(satLayer)) satLayer.addTo(map);
+                satBtn.className = 'px-2 py-0.5 rounded text-[9px] font-bold bg-blue-600 text-white border border-blue-400/40';
+                streetBtn.className = 'px-2 py-0.5 rounded text-[9px] font-bold bg-black/40 text-gray-400 border border-white/10';
+            } else {
+                if (satLayer && map.hasLayer(satLayer)) map.removeLayer(satLayer);
+                if (streetLayer && !map.hasLayer(streetLayer)) streetLayer.addTo(map);
+                streetBtn.className = 'px-2 py-0.5 rounded text-[9px] font-bold bg-blue-600 text-white border border-blue-400/40';
+                satBtn.className = 'px-2 py-0.5 rounded text-[9px] font-bold bg-black/40 text-gray-400 border border-white/10';
+            }
+        }
+
+        function centerVehicleMap() {
+            if (map && vehicleMarker) {
+                map.setView(vehicleMarker.getLatLng(), Math.max(map.getZoom(), 9), { animate: true });
+            }
+        }
+
+        // ---------------------------------------------------------------
+        //  Route milestones (user-driven progress tracking)
+        // ---------------------------------------------------------------
+        function renderMilestones() {
+            const container = document.getElementById('milestones-container');
+            if (!container) return;
+            container.innerHTML = '';
+            milestonesList.forEach(m => {
+                const row = document.createElement('button');
+                row.type = 'button';
+                row.onclick = () => tapMilestone(m.id);
+                const stateBorder = m.active ? 'border-blue-500/60' : m.done ? 'border-emerald-500/40' : 'border-white/5';
+                const stateBg = m.active ? 'bg-blue-500/10' : 'bg-black/20';
+                row.className = `w-full text-left flex items-start gap-2.5 p-2.5 rounded-xl ${stateBg} border ${stateBorder} active:scale-[0.99] transition`;
+                const dot = m.done
+                    ? '<span class="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[10px]"><i class="fa-solid fa-check"></i></span>'
+                    : m.active
+                        ? '<span class="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] animate-pulse"><i class="fa-solid fa-location-arrow"></i></span>'
+                        : '<span class="w-5 h-5 rounded-full border-2 border-gray-600"></span>';
+                row.innerHTML = `
+                    <div class="mt-0.5">${dot}</div>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center justify-between gap-2">
+                            <p class="text-xs font-bold ${m.done ? 'text-emerald-300 line-through' : 'text-gray-100'} truncate">${m.title}</p>
+                            <span class="text-[9px] font-mono-num text-gray-400 shrink-0">${m.dist}</span>
+                        </div>
+                        <p class="text-[10px] text-gray-400 leading-snug mt-0.5">${m.desc}</p>
+                    </div>`;
+                container.appendChild(row);
+            });
+            const doneCount = milestonesList.filter(m => m.done).length;
+            const pct = Math.round((doneCount / milestonesList.length) * 100);
+            const badge = document.getElementById('route-progress-percent');
+            if (badge) badge.textContent = pct + '% Done';
+        }
+
+        function tapMilestone(id) {
+            const idx = milestonesList.findIndex(m => m.id === id);
+            if (idx === -1) return;
+            const m = milestonesList[idx];
+            m.done = !m.done;
+            // Active = first not-done milestone.
+            milestonesList.forEach(x => x.active = false);
+            const nextActive = milestonesList.find(x => !x.done);
+            if (nextActive) nextActive.active = true;
+            currentStepIndex = nextActive ? milestonesList.indexOf(nextActive) : milestonesList.length - 1;
+            updateNavBanner();
+            renderMilestones();
+            if (map && routePoints[idx]) {
+                map.panTo([routePoints[idx].lat, routePoints[idx].lng], { animate: true });
+            }
+            if (m.done) speak('Milestone reached: ' + m.title);
+        }
+
+        function updateNavBanner() {
+            const active = milestonesList.find(m => m.active) || milestonesList[milestonesList.length - 1];
+            const titleEl = document.getElementById('current-step-title');
+            const descEl = document.getElementById('current-step-desc');
+            if (active && titleEl) titleEl.textContent = 'Step ' + active.id + ': ' + active.title;
+            if (active && descEl) descEl.textContent = active.desc;
+            const limitEl = document.getElementById('live-speed-limit');
+            const rp = routePoints[Math.min(currentStepIndex, routePoints.length - 1)];
+            if (limitEl && rp) limitEl.firstChild.textContent = rp.limit + ' ';
+        }
+
+        // ---------------------------------------------------------------
+        //  Trip prep checklist
+        // ---------------------------------------------------------------
+        function renderChecklist() {
+            const container = document.getElementById('checklist-container');
+            if (!container) return;
+            container.innerHTML = '';
+            checklistData.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'flex items-center gap-2.5 p-2.5 rounded-xl bg-black/20 border border-white/5';
+                row.innerHTML = `
+                    <button type="button" aria-label="toggle" class="shrink-0 w-5 h-5 rounded-md border-2 ${item.checked ? 'bg-blue-500 border-blue-500' : 'border-gray-600'} flex items-center justify-center text-white text-[10px]">
+                        ${item.checked ? '<i class="fa-solid fa-check"></i>' : ''}
+                    </button>
+                    <span class="flex-1 text-xs ${item.checked ? 'text-gray-500 line-through' : 'text-gray-200'} leading-snug">${item.text}</span>
+                    <button type="button" aria-label="delete" class="shrink-0 w-7 h-7 rounded-lg text-gray-500 hover:text-rose-400 flex items-center justify-center">
+                        <i class="fa-solid fa-trash-can text-xs"></i>
+                    </button>`;
+                row.children[0].onclick = () => toggleChecklistItem(item.id);
+                row.children[2].onclick = () => deleteChecklistItem(item.id);
+                container.appendChild(row);
+            });
+            const count = document.getElementById('checklist-count');
+            if (count) count.textContent = checklistData.filter(i => i.checked).length + '/' + checklistData.length;
+        }
+
+        function toggleChecklistItem(id) {
+            const it = checklistData.find(i => i.id === id);
+            if (!it) return;
+            it.checked = !it.checked;
+            saveChecklist();
+            renderChecklist();
+        }
+        function deleteChecklistItem(id) {
+            checklistData = checklistData.filter(i => i.id !== id);
+            saveChecklist();
+            renderChecklist();
+        }
+        function addChecklistItem() {
+            const input = document.getElementById('input-new-chk');
+            const text = (input.value || '').trim();
+            if (!text) { showToast('Enter a task first', 'warn'); return; }
+            const nextId = checklistData.reduce((m, i) => Math.max(m, i.id), 0) + 1;
+            checklistData.push({ id: nextId, text, checked: false });
+            input.value = '';
+            saveChecklist();
+            renderChecklist();
+            showToast('Task added', 'ok');
+        }
+
+        // ---------------------------------------------------------------
+        //  Budget Buddy expense tracker
+        // ---------------------------------------------------------------
+        function renderExpenses() {
+            const container = document.getElementById('expense-list-container');
+            if (!container) return;
+            container.innerHTML = '';
+            const catIcon = {
+                'Fuel': '⛽', 'Cash Toll': '💵', 'Plate Toll': '📷',
+                'Food/Snacks': '🍔', 'Misc': '🔧'
+            };
+            expenseList.forEach(x => {
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between gap-2 p-2 rounded-xl bg-black/20 border border-white/5';
+                row.innerHTML = `
+                    <div class="flex items-center gap-2 min-w-0">
+                        <span class="text-base">${catIcon[x.cat] || '🔧'}</span>
+                        <div class="min-w-0">
+                            <p class="text-xs text-gray-200 font-semibold truncate">${x.cat}</p>
+                            ${x.desc ? `<p class="text-[10px] text-gray-500 truncate">${x.desc}</p>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span class="text-xs font-mono-num font-bold text-emerald-400">$${Number(x.amt).toFixed(2)}</span>
+                        <button type="button" aria-label="delete" class="w-7 h-7 rounded-lg text-gray-500 hover:text-rose-400 flex items-center justify-center">
+                            <i class="fa-solid fa-trash-can text-xs"></i>
+                        </button>
+                    </div>`;
+                row.querySelector('button').onclick = () => deleteExpenseItem(x.id);
+                container.appendChild(row);
+            });
+            const total = expenseList.reduce((s, x) => s + Number(x.amt || 0), 0);
+            const totalEl = document.getElementById('budget-total');
+            if (totalEl) totalEl.textContent = '$' + total.toFixed(2) + ' Spent';
+        }
+
+        function addExpenseItem() {
+            const cat = document.getElementById('input-exp-cat').value;
+            const amtEl = document.getElementById('input-exp-amt');
+            const amt = parseFloat(amtEl.value);
+            if (isNaN(amt) || amt <= 0) { showToast('Enter a valid amount', 'warn'); return; }
+            const nextId = expenseList.reduce((m, i) => Math.max(m, i.id), 0) + 1;
+            expenseList.push({ id: nextId, cat, amt: Math.round(amt * 100) / 100, desc: '' });
+            amtEl.value = '';
+            saveExpenses();
+            renderExpenses();
+            showToast('Expense logged', 'ok');
+        }
+        function deleteExpenseItem(id) {
+            expenseList = expenseList.filter(x => x.id !== id);
+            saveExpenses();
+            renderExpenses();
+        }
+
+        // ---------------------------------------------------------------
+        //  Rapid rest-stop timer (real wall-clock timer)
+        // ---------------------------------------------------------------
+        function formatMMSS(totalSec) {
+            const m = Math.floor(totalSec / 60);
+            const s = totalSec % 60;
+            return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        }
+        function updateTimerDisplay() {
+            const el = document.getElementById('timer-display');
+            if (!el) return;
+            el.textContent = formatMMSS(breakTimerSeconds);
+            if (breakTimerSeconds >= 900) {
+                el.classList.remove('text-emerald-300');
+                el.classList.add('text-rose-400');
+            } else {
+                el.classList.add('text-emerald-300');
+                el.classList.remove('text-rose-400');
+            }
+        }
+        function startBreakTimer() {
+            if (breakTimerInterval) return;
+            breakTimerInterval = setInterval(() => {
+                breakTimerSeconds++;
+                updateTimerDisplay();
+                if (breakTimerSeconds === 900) {
+                    showToast('15 minute rest-stop goal reached — back on the road!', 'warn');
+                    speak('Fifteen minutes reached. Time to get back on the road.');
+                }
+            }, 1000);
+            showToast('Rest-stop timer started', 'ok');
+        }
+        function pauseBreakTimer() {
+            if (breakTimerInterval) { clearInterval(breakTimerInterval); breakTimerInterval = null; }
+        }
+        function resetBreakTimer() {
+            pauseBreakTimer();
+            breakTimerSeconds = 0;
+            updateTimerDisplay();
+        }
+
+        // ---------------------------------------------------------------
+        //  Live clock + ETA (derived from real time; distance from GPS)
+        // ---------------------------------------------------------------
+        function updateLiveClock() {
+            const now = new Date();
+            const clockEl = document.getElementById('live-clock');
+            if (clockEl) {
+                clockEl.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+            const remaining = telemetry.distRemaining;
+            const avgSpeed = 62;
+            const etaDate = new Date(now.getTime() + (remaining / avgSpeed) * 3600 * 1000);
+            const etaStr = etaDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const etaEl = document.getElementById('eta-countdown');
+            const hudEta = document.getElementById('hud-eta');
+            if (etaEl) etaEl.textContent = 'ETA ~' + etaStr;
+            if (hudEta) hudEta.textContent = etaStr;
+        }
+
+        // ---------------------------------------------------------------
+        //  Co-Pilot: curated route cautions + real Gemini AI (needs key)
+        // ---------------------------------------------------------------
+        const copilotAlerts = [
+            { icon: 'fa-mountain', color: 'amber', title: 'PA Turnpike Grades (Allegheny Mtns)', body: 'Sustained climbs near Sideling Hill. Maintain 2,000–2,300 RPM; watch coolant temp on long ascents.' },
+            { icon: 'fa-tunnel', color: 'blue', title: 'Turnpike Tunnels', body: 'Allegheny/Tuscarora tunnels drop to 45–50 MPH. No lane changes; headlights on.' },
+            { icon: 'fa-money-bill-wave', color: 'emerald', title: 'Walt Whitman Bridge Toll', body: 'Westbound entry to NJ is $5.00 cash. Have exact change ready in the cash lane.' },
+            { icon: 'fa-gas-pump', color: 'rose', title: 'Fuel Strategy', body: 'Top off at Youngstown (~215 mi) and Sideling Hill plaza (~420 mi) to avoid PA Turnpike price premiums.' },
+            { icon: 'fa-moon', color: 'purple', title: 'Night Driving', body: 'Arrival ~2 AM. Use HUD mode on the dashboard and take the 15-min rest goal seriously to fight fatigue.' }
+        ];
+
+        function renderCopilotAlerts() {
+            const feed = document.getElementById('copilot-alerts-feed');
+            if (!feed) return;
+            feed.innerHTML = '';
+            if (!isCopilotActive) {
+                feed.innerHTML = '<p class="text-[11px] text-gray-500 italic px-1 py-3 text-center">Co-Pilot alerts are muted. Toggle on to see live route cautions.</p>';
+                return;
+            }
+            const cmap = {
+                amber: 'from-amber-950 border-amber-500/30 text-amber-300',
+                blue: 'from-blue-950 border-blue-500/30 text-blue-300',
+                emerald: 'from-emerald-950 border-emerald-500/30 text-emerald-300',
+                rose: 'from-rose-950 border-rose-500/30 text-rose-300',
+                purple: 'from-purple-950 border-purple-500/30 text-purple-300'
+            };
+            copilotAlerts.forEach(a => {
+                const card = document.createElement('div');
+                card.className = `bg-gradient-to-r ${cmap[a.color]} to-androidCard border rounded-xl p-3 flex items-start gap-3`;
+                card.innerHTML = `
+                    <i class="fa-solid ${a.icon} mt-0.5"></i>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-xs font-bold text-white">${a.title}</p>
+                        <p class="text-[11px] text-gray-300 leading-snug mt-0.5">${a.body}</p>
+                    </div>`;
+                feed.appendChild(card);
+            });
+        }
+
+        function toggleCopilotAlerts() {
+            isCopilotActive = !isCopilotActive;
+            const chk = document.getElementById('chk-copilot-active');
+            if (chk) chk.checked = isCopilotActive;
+            const icon = document.getElementById('icon-copilot');
+            if (icon) icon.className = 'fa-solid ' + (isCopilotActive ? 'fa-bell' : 'fa-bell-slash') + ' text-purple-400 text-xs';
+            renderCopilotAlerts();
+            showToast(isCopilotActive ? 'Co-Pilot alerts on' : 'Co-Pilot alerts muted', isCopilotActive ? 'ok' : 'info');
+        }
+
+        async function askGeminiCopilot() {
+            const input = document.getElementById('copilot-input');
+            const box = document.getElementById('copilot-response');
+            const question = (input.value || '').trim();
+            if (!question) { showToast('Type a question for the Co-Pilot', 'warn'); return; }
+
+            let key = localStorage.getItem(LS_KEYS.gemini);
+            if (!key) {
+                key = (prompt('Enter your Google Gemini API key to enable the AI Co-Pilot.\nGet one free at https://aistudio.google.com/app/apikey\n\n(Stored only on this device.)') || '').trim();
+                if (!key) {
+                    box.classList.remove('hidden');
+                    box.innerHTML = '<span class="text-rose-300"><i class="fa-solid fa-key mr-1"></i> AI Co-Pilot needs a Gemini API key to function. No key was provided.</span>';
+                    return;
+                }
+                localStorage.setItem(LS_KEYS.gemini, key);
+            }
+
+            box.classList.remove('hidden');
+            box.innerHTML = '<span class="text-purple-300"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Asking Gemini…</span>';
+
+            const context = `You are the in-car AI co-pilot for a road trip from Sterling Heights, MI to Sewell, NJ (~626 miles) via the Ohio and Pennsylvania Turnpikes and the Walt Whitman Bridge. Give concise, practical driving guidance.`;
+            try {
+                const res = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: context + '\n\nDriver question: ' + question }] }]
+                        })
+                    }
+                );
+                if (!res.ok) {
+                    const errTxt = await res.text();
+                    throw new Error('HTTP ' + res.status + ' ' + errTxt.slice(0, 160));
+                }
+                const data = await res.json();
+                const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!answer) throw new Error('Empty response from Gemini.');
+                box.innerHTML = `<i class="fa-solid fa-robot text-purple-400 mr-1"></i> ${answer.replace(/</g, '&lt;')}`;
+                speak(answer);
+            } catch (err) {
+                console.error('Gemini error:', err);
+                box.innerHTML = `<span class="text-rose-300"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Co-Pilot request failed: ${String(err.message).replace(/</g, '&lt;')}</span><br><span class="text-[10px] text-gray-400">Check your API key and network. Clear a bad key by reloading and re-entering.</span>`;
+                if (String(err.message).includes('400') || String(err.message).includes('403')) {
+                    localStorage.removeItem(LS_KEYS.gemini);
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        //  Voice + HUD toggles
+        // ---------------------------------------------------------------
+        function toggleVoice() {
+            isVoiceEnabled = !isVoiceEnabled;
+            const icon = document.getElementById('icon-voice');
+            if (icon) icon.className = 'fa-solid ' + (isVoiceEnabled ? 'fa-volume-high' : 'fa-volume-xmark') + ' text-blue-400 text-xs';
+            if (isVoiceEnabled) speak('Voice guidance enabled');
+            else if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+            showToast(isVoiceEnabled ? 'Voice guidance on' : 'Voice guidance off', 'info');
+        }
+
+        function toggleHUDMirror() {
+            isHUDMirrored = !isHUDMirrored;
+            const box = document.getElementById('hud-display-box');
+            if (box) box.classList.toggle('mirror-hud', isHUDMirrored);
+            showToast(isHUDMirrored ? 'HUD mirror mode on (windshield reflection)' : 'HUD mirror mode off', 'info');
+        }
+
+        // ---------------------------------------------------------------
+        //  Trip activation — starts/stops REAL device GPS tracking only.
+        // ---------------------------------------------------------------
+        let gpsWatchId = null;
+
+        function toggleTripActive() {
+            isTripActive = !isTripActive;
+            const iconGo = document.getElementById('icon-go');
+            const textGo = document.getElementById('text-go');
+            const dot = document.getElementById('live-trip-dot');
+            const statusText = document.getElementById('trip-status-text');
+            const badge = document.getElementById('nav-mode-badge');
+
+            if (isTripActive) {
+                iconGo.className = 'fa-solid fa-stop';
+                textGo.textContent = 'END';
+                dot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+                if (statusText) statusText.textContent = 'Live Trip Active • GPS Tracking';
+                if (badge) { badge.textContent = 'Live Navigation'; badge.className = 'text-[9px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'; }
+                startGPS();
+                speak('Trip started. Drive safe to Sewell, New Jersey.');
+                showToast('Trip started — acquiring GPS', 'ok');
+            } else {
+                iconGo.className = 'fa-solid fa-play';
+                textGo.textContent = 'GO!';
+                dot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+                if (statusText) statusText.textContent = 'Pre-Flight Mode • ' + Math.round(TOTAL_ROUTE_MILES) + ' Mi';
+                if (badge) { badge.textContent = 'Pre-Flight Prep'; badge.className = 'text-[9px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'; }
+                stopGPS();
+                showToast('Trip ended', 'info');
+            }
+        }
+
+        function initGPSWatcher() {
+            // GPS is only engaged when the trip is active (toggleTripActive).
+            if (!('geolocation' in navigator)) {
+                console.warn('Geolocation not available on this device.');
+            }
+        }
+
+        function startGPS() {
+            if (!('geolocation' in navigator)) {
+                showToast('Geolocation not supported on this device', 'error');
+                return;
+            }
+            if (gpsWatchId !== null) return;
+            gpsWatchId = navigator.geolocation.watchPosition(
+                onGPSUpdate,
+                (err) => {
+                    console.warn('GPS error:', err);
+                    showToast('GPS unavailable: ' + err.message, 'error');
+                },
+                { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+            );
+        }
+
+        function stopGPS() {
+            if (gpsWatchId !== null) {
+                navigator.geolocation.clearWatch(gpsWatchId);
+                gpsWatchId = null;
+            }
+        }
+
+        function onGPSUpdate(pos) {
+            const { latitude, longitude, speed } = pos.coords;
+            const here = { lat: latitude, lng: longitude };
+            if (vehicleMarker) vehicleMarker.setLatLng([latitude, longitude]);
+            if (map && isTripActive) map.panTo([latitude, longitude], { animate: true });
+
+            // Real speed from GPS (m/s -> mph). Some devices report null.
+            let mph = 0;
+            if (typeof speed === 'number' && speed >= 0) {
+                mph = speed * 2.2369362921;
+                telemetry.speed = mph;
+                setSpeedDisplays(mph);
+            }
+
+            // Remaining distance = straight-line to each remaining waypoint along route.
+            let nearestIdx = 0, nearestDist = Infinity;
+            routePoints.forEach((p, i) => {
+                const d = haversineMiles(here, p);
+                if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+            });
+            const traveled = routeCumMiles[nearestIdx];
+            const remaining = Math.max(0, TOTAL_ROUTE_MILES - traveled);
+            telemetry.distRemaining = remaining;
+            const distEl = document.getElementById('live-dist-remaining');
+            if (distEl) distEl.textContent = Math.round(remaining) + ' Mi';
+        }
+
+        function setSpeedDisplays(mph) {
+            const r = Math.round(mph);
+            const nav = document.getElementById('live-speed');
+            const obd = document.getElementById('obd-speed');
+            const hud = document.getElementById('hud-speed');
+            const bar = document.getElementById('bar-speed');
+            if (nav) nav.firstChild.textContent = r + ' ';
+            if (obd) obd.firstChild.textContent = r + ' ';
+            if (hud) hud.firstChild.textContent = r + ' ';
+            if (bar) bar.style.width = Math.min(100, (mph / 120) * 100) + '%';
+        }
+
+        // ---------------------------------------------------------------
+        //  Live telemetry waveform chart (plots ONLY real captured data)
+        // ---------------------------------------------------------------
+        let chartCtx = null, chartCanvas = null;
+
+        function initTelemetryChart() {
+            chartCanvas = document.getElementById('telemetry-chart');
+            if (!chartCanvas) return;
+            const dpr = window.devicePixelRatio || 1;
+            const rect = chartCanvas.getBoundingClientRect();
+            chartCanvas.width = Math.max(320, rect.width) * dpr;
+            chartCanvas.height = Math.max(112, rect.height) * dpr;
+            chartCtx = chartCanvas.getContext('2d');
+            chartCtx.scale(dpr, dpr);
+            drawTelemetryChart();
+        }
+
+        function drawSeries(ctx, arr, w, h, color, min, max) {
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.6;
+            const n = arr.length;
+            for (let i = 0; i < n; i++) {
+                const x = (i / (n - 1)) * w;
+                const norm = (arr[i] - min) / (max - min);
+                const y = h - Math.max(0, Math.min(1, norm)) * h;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        function drawTelemetryChart() {
+            if (!chartCtx || !chartCanvas) return;
+            const dpr = window.devicePixelRatio || 1;
+            const w = chartCanvas.width / dpr;
+            const h = chartCanvas.height / dpr;
+            chartCtx.clearRect(0, 0, w, h);
+            // grid
+            chartCtx.strokeStyle = 'rgba(255,255,255,0.06)';
+            chartCtx.lineWidth = 1;
+            for (let g = 1; g < 4; g++) {
+                const y = (g / 4) * h;
+                chartCtx.beginPath(); chartCtx.moveTo(0, y); chartCtx.lineTo(w, y); chartCtx.stroke();
+            }
+            drawSeries(chartCtx, chartData.boost, w, h, '#06b6d4', -20, 20);
+            drawSeries(chartCtx, chartData.friction, w, h, '#f59e0b', -20, 60);
+            drawSeries(chartCtx, chartData.speed, w, h, '#10b981', 0, 100);
+        }
+
+        function pushChartSample() {
+            chartData.boost.push(telemetry.boostPsi); chartData.boost.shift();
+            chartData.friction.push(telemetry.frictionTorquePct); chartData.friction.shift();
+            chartData.speed.push(telemetry.speed); chartData.speed.shift();
+            drawTelemetryChart();
+        }
+
+        // ---------------------------------------------------------------
+        //  OBD dashboard render (called only from real BLE PID responses)
+        // ---------------------------------------------------------------
+        function updateOBDDashboard() {
+            const rpmEl = document.getElementById('obd-rpm');
+            const rpmBar = document.getElementById('bar-rpm');
+            if (rpmEl) rpmEl.firstChild.textContent = Math.round(telemetry.rpm) + ' ';
+            if (rpmBar) rpmBar.style.width = Math.min(100, (telemetry.rpm / 7000) * 100) + '%';
+
+            setSpeedDisplays(telemetry.speed);
+
+            const loadEl = document.getElementById('obd-load');
+            const loadBar = document.getElementById('bar-load');
+            if (loadEl) loadEl.firstChild.textContent = Math.round(telemetry.load) + ' ';
+            if (loadBar) loadBar.style.width = Math.min(100, telemetry.load) + '%';
+
+            const coolantEl = document.getElementById('obd-coolant');
+            const coolantBar = document.getElementById('bar-coolant');
+            if (coolantEl) coolantEl.firstChild.textContent = Math.round(telemetry.coolant) + ' ';
+            if (coolantBar) coolantBar.style.width = Math.min(100, Math.max(0, ((telemetry.coolant + 40) / 290) * 100)) + '%';
+
+            // Boost / vacuum gauge from MAP kPa
+            const baro = 101.3;
+            const boostPsi = (telemetry.mapKpa - baro) * 0.1450377;
+            telemetry.boostPsi = boostPsi;
+            const boostValEl = document.getElementById('obd-boost-val');
+            const boostUnitEl = document.getElementById('obd-boost-unit');
+            const hudBoost = document.getElementById('hud-boost');
+            let displayStr, unitStr;
+            if (boostPsi >= 0.2) {
+                displayStr = '+' + boostPsi.toFixed(1);
+                unitStr = 'PSI (Boost)';
+            } else {
+                const inHg = (baro - telemetry.mapKpa) * 0.2952999;
+                displayStr = '-' + Math.abs(inHg).toFixed(1);
+                unitStr = 'InHg (Vac)';
+            }
+            if (boostValEl) boostValEl.textContent = displayStr;
+            if (boostUnitEl) boostUnitEl.textContent = unitStr;
+            if (hudBoost) hudBoost.textContent = displayStr + ' ' + (boostPsi >= 0.2 ? 'PSI' : 'InHg');
+
+            // Needle: scale -14.7psi (full vac) .. +20psi
+            const minP = -14.7, maxP = 20;
+            const f = Math.max(0, Math.min(1, (boostPsi - minP) / (maxP - minP)));
+            const needle = document.getElementById('svg-needle-group');
+            if (needle) needle.setAttribute('transform', `rotate(${(-90 + f * 180).toFixed(1)} 100 100)`);
+            const arc = document.getElementById('svg-boost-arc');
+            if (arc) {
+                const fb = Math.max(0, Math.min(1, boostPsi / maxP));
+                arc.setAttribute('stroke-dashoffset', (125.6 * (1 - fb)).toFixed(1));
+            }
+
+            // Friction torque
+            const frEl = document.getElementById('obd-friction-val');
+            const frBar = document.getElementById('bar-friction');
+            const frPct = telemetry.frictionTorquePct;
+            if (frEl) frEl.textContent = Math.round(frPct) + '% Parasitic Torque';
+            if (frBar) frBar.style.width = Math.min(100, Math.max(0, frPct)) + '%';
+
+            pushChartSample();
+        }
+
+        // ---------------------------------------------------------------
+        //  Veepeak+ OBD II — REAL Web Bluetooth ELM327 connection.
+        //  No data is ever fabricated: every value comes from PID replies.
+        // ---------------------------------------------------------------
+        const ELM_SERVICE_UUIDS = [
+            0xfff0,
+            0xffe0,
+            '0000fff0-0000-1000-8000-00805f9b34fb',
+            '0000ffe0-0000-1000-8000-00805f9b34fb',
+            '6e400001-b5a3-f393-e0a9-e50e24dcca9e' // Nordic UART
+        ];
+
+        function setObdConnectedUI(connected) {
+            const badge = document.getElementById('obd-badge');
+            const dot = document.getElementById('obd-status-dot');
+            const statusText = document.getElementById('obd-status-text');
+            const btn = document.getElementById('btn-connect-obd');
+            const iconBg = document.getElementById('obd-icon-bg');
+            const ping = document.getElementById('nav-obd-ping');
+            if (connected) {
+                if (badge) { badge.textContent = 'Connected'; badge.className = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] px-2 py-0.5 rounded-full'; }
+                if (dot) dot.className = 'w-2 h-2 rounded-full bg-emerald-500';
+                if (statusText) statusText.textContent = 'Live';
+                if (btn) btn.innerHTML = '<i class="fa-solid fa-plug-circle-xmark"></i> Disconnect Veepeak+ BLE';
+                if (iconBg) iconBg.className = 'w-10 h-10 rounded-xl bg-emerald-600/30 border border-emerald-400/40 flex items-center justify-center text-emerald-400 text-lg';
+                if (ping) ping.classList.remove('hidden');
+            } else {
+                if (badge) { badge.textContent = 'Disconnected'; badge.className = 'bg-red-500/20 text-red-400 border border-red-500/30 text-[10px] px-2 py-0.5 rounded-full'; }
+                if (dot) dot.className = 'w-2 h-2 rounded-full bg-red-500';
+                if (statusText) statusText.textContent = 'Veepeak+';
+                if (btn) btn.innerHTML = '<i class="fa-solid fa-plug"></i> Connect Veepeak+ BLE Hardware';
+                if (iconBg) iconBg.className = 'w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400/40 flex items-center justify-center text-blue-400 text-lg';
+                if (ping) ping.classList.add('hidden');
+            }
+        }
+
+        async function connectVeepeakOBD() {
+            if (gattServer && gattServer.connected) {
+                disconnectOBD();
+                return;
+            }
+            if (!navigator.bluetooth) {
+                showToast('Web Bluetooth not supported. Use Chrome on Android or desktop Chrome over HTTPS/localhost.', 'error');
+                const info = document.getElementById('obd-device-info');
+                if (info) info.textContent = 'Web Bluetooth unavailable in this browser.';
+                return;
+            }
+            try {
+                showToast('Select your Veepeak dongle…', 'info');
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: ELM_SERVICE_UUIDS
+                });
+                bluetoothDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
+
+                const info = document.getElementById('obd-device-info');
+                if (info) info.textContent = 'Connecting to ' + (bluetoothDevice.name || 'device') + '…';
+
+                gattServer = await bluetoothDevice.gatt.connect();
+                const services = await gattServer.getPrimaryServices();
+                let found = false;
+                for (const service of services) {
+                    const chars = await service.getCharacteristics();
+                    let notifyChar = null, writeChar = null;
+                    for (const ch of chars) {
+                        if (ch.properties.notify || ch.properties.indicate) notifyChar = ch;
+                        if (ch.properties.write || ch.properties.writeWithoutResponse) writeChar = ch;
+                    }
+                    if (notifyChar && writeChar) {
+                        rxCharacteristic = notifyChar;
+                        txCharacteristic = writeChar;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) throw new Error('No compatible UART service found on this device.');
+
+                await rxCharacteristic.startNotifications();
+                rxCharacteristic.addEventListener('characteristicvaluechanged', onOBDNotification);
+
+                if (info) info.textContent = 'Connected: ' + (bluetoothDevice.name || 'Veepeak+');
+                setObdConnectedUI(true);
+                showToast('Veepeak+ connected — initializing ELM327', 'ok');
+                speak('OBD adapter connected.');
+                await initELM327();
+                startPidPolling();
+            } catch (err) {
+                console.error('OBD connect error:', err);
+                if (err && err.name === 'NotFoundError') {
+                    showToast('No device selected', 'info');
+                } else {
+                    showToast('OBD connection failed: ' + (err.message || err), 'error');
+                }
+                disconnectOBD();
+            }
+        }
+
+        function onBleDisconnected() {
+            showToast('Veepeak+ disconnected', 'warn');
+            disconnectOBD();
+        }
+
+        function disconnectOBD() {
+            if (obdInterval) { clearInterval(obdInterval); obdInterval = null; }
+            try {
+                if (rxCharacteristic) rxCharacteristic.removeEventListener('characteristicvaluechanged', onOBDNotification);
+            } catch (e) {}
+            try {
+                if (gattServer && gattServer.connected) gattServer.disconnect();
+            } catch (e) {}
+            gattServer = null; rxCharacteristic = null; txCharacteristic = null;
+            isWaitingForPidResponse = false; obdRxBuffer = '';
+            setObdConnectedUI(false);
+        }
+
+        async function writeELM(command) {
+            if (!txCharacteristic) throw new Error('Not connected');
+            const data = textEncoder.encode(command + '\r');
+            if (txCharacteristic.properties.writeWithoutResponse) {
+                await txCharacteristic.writeValueWithoutResponse(data);
+            } else {
+                await txCharacteristic.writeValue(data);
+            }
+        }
+
+        async function initELM327() {
+            const seq = ['ATZ', 'ATE0', 'ATL0', 'ATS0', 'ATH0', 'ATSP0', '0100'];
+            for (const cmd of seq) {
+                try {
+                    await writeELM(cmd);
+                    await new Promise(r => setTimeout(r, 350));
+                } catch (e) { console.warn('ELM init cmd failed', cmd, e); }
+            }
+        }
+
+        function startPidPolling() {
+            if (obdInterval) clearInterval(obdInterval);
+            activePidIndex = 0;
+            isWaitingForPidResponse = false;
+            obdInterval = setInterval(async () => {
+                if (!gattServer || !gattServer.connected) return;
+                if (isWaitingForPidResponse) return;
+                const pid = pidList[activePidIndex];
+                try {
+                    isWaitingForPidResponse = true;
+                    obdRxBuffer = '';
+                    await writeELM(pid);
+                } catch (e) {
+                    isWaitingForPidResponse = false;
+                }
+                activePidIndex = (activePidIndex + 1) % pidList.length;
+            }, 220);
+        }
+
+        function onOBDNotification(event) {
+            const chunk = textDecoder.decode(event.target.value);
+            obdRxBuffer += chunk;
+            if (obdRxBuffer.includes('>')) {
+                const response = obdRxBuffer.replace(/>/g, '').trim();
+                obdRxBuffer = '';
+                isWaitingForPidResponse = false;
+                parseOBDResponse(response);
+            }
+        }
+
+        function parseOBDResponse(raw) {
+            // Normalize: keep hex byte tokens only.
+            const cleaned = raw.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+            if (!cleaned || /NO DATA|UNABLE|ERROR|SEARCHING|STOPPED|\?/i.test(cleaned)) return;
+            const bytes = cleaned.split(' ').filter(t => /^[0-9A-Fa-f]{2}$/.test(t)).map(t => parseInt(t, 16));
+            // Find "41" (response to mode 01) followed by PID.
+            const idx = bytes.indexOf(0x41);
+            if (idx === -1 || idx + 1 >= bytes.length) return;
+            const pid = bytes[idx + 1];
+            const A = bytes[idx + 2];
+            const B = bytes[idx + 3];
+            switch (pid) {
+                case 0x0C: if (A != null && B != null) telemetry.rpm = ((A * 256) + B) / 4; break;
+                case 0x0D: if (A != null) telemetry.speed = A * 0.6213711922; break;
+                case 0x04: if (A != null) telemetry.load = (A * 100) / 255; break;
+                case 0x05: if (A != null) telemetry.coolant = (A - 40) * 9 / 5 + 32; break;
+                case 0x0B: if (A != null) telemetry.mapKpa = A; break;
+                case 0x54: if (A != null) telemetry.frictionTorquePct = A - 125; break;
+                default: return;
+            }
+            updateOBDDashboard();
+        }
+
+    </script>
+
+    <script>
+        // Redraw chart responsively.
+        window.addEventListener('resize', () => {
+            if (typeof initTelemetryChart === 'function') initTelemetryChart();
+        });
+    </script>
+</body>
+</html>
