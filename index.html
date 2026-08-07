@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Road Trip Companion - Veepeak+ OBD II Diagnostic Dashboard</title>
+
+    <!-- Android & PWA Manifest & Meta Tags -->
+    <meta name="theme-color" content="#06090f">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="application-name" content="RoadTrip OBD">
+    <link rel="manifest" href='data:application/manifest+json,{"name":"Road Trip Companion OBD","short_name":"RoadTrip","description":"Sterling Heights to Sewell NJ Road Trip & Veepeak OBD II Companion","start_url":".","display":"standalone","orientation":"portrait","background_color":"#05080e","theme_color":"#06090f","icons":[{"src":"https://placehold.co/192x192/06090f/00f0ff?text=OBD2","sizes":"192x192","type":"image/png"},{"src":"https://placehold.co/512x512/06090f/00f0ff?text=OBD2","sizes":"512x512","type":"image/png"}]}'>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        androidDark: '#06090f',
+                        androidCard: '#101622',
+                        androidCardHover: '#172030',
+                        androidBorder: '#212d40',
+                        accentBlue: '#3b82f6',
+                        accentGreen: '#10b981',
+                        accentAmber: '#f59e0b',
+                        accentPurple: '#a855f7',
+                        accentRed: '#ef4444',
+                        accentCyan: '#06b6d4',
+                        neonGlow: '#00f0ff'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Google Fonts, FontAwesome & Leaflet Map CSS/JS -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700;800&display=swap">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #05080e;
+            color: #f1f5f9;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            overflow-x: hidden;
+        }
+        .font-mono-num {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .glass-panel {
+            background: rgba(16, 22, 34, 0.92);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+        }
+        .mirror-hud {
+            transform: scaleX(-1) scaleY(-1);
+        }
+        #nav-map {
+            width: 100%;
+            height: 380px;
+            border-radius: 1.25rem;
+            z-index: 10;
+        }
+        .leaflet-container {
+            background: #06090f !important;
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #06090f;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #212d40;
+            border-radius: 4px;
+        }
+        .pulse-ring {
+            box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+            animation: pulse-animation 1.8s infinite;
+        }
+        @keyframes pulse-animation {
+            0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+            70% { box-shadow: 0 0 0 12px rgba(59, 130, 246, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+        .glow-cyan {
+            filter: drop-shadow(0 0 8px rgba(6, 182, 212, 0.6));
+        }
+        .glow-amber {
+            filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.6));
+        }
+        .glow-emerald {
+            filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.6));
+        }
+    </style>
+</head>
+<body class="pb-24 pt-16 min-h-screen selection:bg-cyan-500 selection:text-black">
+
+    <!-- TOP FIXED HEADER BAR -->
+    <header class="fixed top-0 left-0 right-0 glass-panel border-b border-androidBorder z-50 px-3 py-2 flex items-center justify-between shadow-2xl">
+        <div class="flex items-center space-x-2.5">
+            <button id="btn-master-go" onclick="toggleTripActive()" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-lg shadow-emerald-600/30 active:scale-95 transition pulse-ring">
+                <i id="icon-go" class="fa-solid fa-play"></i>
+                <span id="text-go">GO!</span>
+            </button>
+
+            <div>
+                <h1 class="text-xs font-black uppercase tracking-wider text-gray-100 leading-tight">Sterling Heights ➔ Sewell</h1>
+                <p id="top-status-sub" class="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                    <span id="live-trip-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    <span id="trip-status-text">Pre-Flight Mode • 626 Mi</span>
+                </p>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-1.5">
+            <!-- PWA Install Button -->
+            <button id="btn-pwa-install" onclick="installAndroidPWA()" class="hidden px-2.5 py-1 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white flex items-center space-x-1 text-xs active:scale-95 transition shadow-lg shadow-purple-600/30">
+                <i class="fa-solid fa-download text-[10px]"></i>
+                <span class="text-[10px] font-bold">Install</span>
+            </button>
+
+            <!-- Veepeak OBD II Status -->
+            <button id="btn-obd-status" onclick="switchTab('obd')" class="px-2.5 py-1 rounded-xl bg-androidCard border border-androidBorder flex items-center space-x-1.5 text-xs text-gray-300 active:scale-95 transition">
+                <span id="obd-status-dot" class="w-2 h-2 rounded-full bg-red-500"></span>
+                <span id="obd-status-text" class="text-[10px] font-mono-num font-bold">Veepeak+</span>
+            </button>
+            
+            <!-- Voice Audio Toggle -->
+            <button id="btn-toggle-voice" onclick="toggleVoice()" class="w-8 h-8 rounded-xl bg-androidCard border border-androidBorder flex items-center justify-center text-gray-300 active:scale-95 transition">
+                <i id="icon-voice" class="fa-solid fa-volume-high text-blue-400 text-xs"></i>
+            </button>
+
+            <!-- Co-Pilot Toggle -->
+            <button id="btn-toggle-copilot" onclick="toggleCopilotAlerts()" class="w-8 h-8 rounded-xl bg-androidCard border border-androidBorder flex items-center justify-center text-gray-300 active:scale-95 transition" title="Toggle Co-Pilot Alerts">
+                <i id="icon-copilot" class="fa-solid fa-bell text-purple-400 text-xs"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- MAIN APP CONTENT CONTAINERS -->
+    <main class="max-w-md mx-auto px-3 space-y-4 mt-1">
+
+        <!-- TAB 1: LIVE NAV, SATELLITE MAP & DYNAMIC STEP TRACKER -->
+        <section id="tab-nav" class="space-y-3 tab-content">
+            
+            <!-- Dynamic Navigation Info Banner -->
+            <div class="bg-gradient-to-r from-blue-950 via-androidCard to-slate-900 border border-blue-500/30 rounded-2xl p-3 shadow-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <span id="nav-mode-badge" class="text-[9px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            Pre-Flight Prep
+                        </span>
+                        <h2 id="current-step-title" class="text-sm font-black text-white mt-1">Step 1: Clock Out & Depart Work</h2>
+                    </div>
+                    <div class="text-right">
+                        <p id="live-clock" class="text-xs font-mono-num text-blue-400 font-bold">04:30 PM</p>
+                        <p id="eta-countdown" class="text-[10px] text-gray-400 font-mono-num">ETA ~2:15 AM</p>
+                    </div>
+                </div>
+
+                <p id="current-step-desc" class="text-xs text-gray-300 mt-2 leading-snug">
+                    Clock out at 4:30 PM in Sterling Heights. Skip backtrack home. Tap GO to initiate real-time GPS & Veepeak+ OBD telemetry tracking.
+                </p>
+
+                <!-- Live Performance Indicators -->
+                <div class="grid grid-cols-4 gap-2 mt-3 pt-2.5 border-t border-white/10 text-center">
+                    <div>
+                        <p class="text-[9px] text-gray-400 uppercase">Speed</p>
+                        <p id="live-speed" class="text-sm font-bold font-mono-num text-emerald-400">0 <span class="text-[9px] font-normal text-gray-400">MPH</span></p>
+                    </div>
+                    <div>
+                        <p class="text-[9px] text-gray-400 uppercase">Speed Limit</p>
+                        <p id="live-speed-limit" class="text-sm font-bold font-mono-num text-amber-300">70 <span class="text-[9px] font-normal text-gray-400">MPH</span></p>
+                    </div>
+                    <div>
+                        <p class="text-[9px] text-gray-400 uppercase">MPG Delta</p>
+                        <p id="live-mpg-variance" class="text-sm font-bold font-mono-num text-cyan-300">+0.0</p>
+                    </div>
+                    <div>
+                        <p class="text-[9px] text-gray-400 uppercase">Dist Left</p>
+                        <p id="live-dist-remaining" class="text-sm font-bold font-mono-num text-purple-300">626 Mi</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Satellite Map Card -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-2 relative shadow-xl overflow-hidden">
+                <div class="flex items-center justify-between px-2 py-1 mb-1">
+                    <span class="text-[10px] font-bold uppercase text-gray-300 flex items-center gap-1.5">
+                        <i class="fa-solid fa-map text-blue-400"></i> Route Map & Live GPS
+                    </span>
+                    <div class="flex items-center gap-1">
+                        <button onclick="setMapLayer('sat')" id="btn-map-sat" class="px-2 py-0.5 rounded text-[9px] font-bold bg-blue-600 text-white border border-blue-400/40">Satellite</button>
+                        <button onclick="setMapLayer('street')" id="btn-map-street" class="px-2 py-0.5 rounded text-[9px] font-bold bg-black/40 text-gray-400 border border-white/10">Street</button>
+                        <button onclick="centerVehicleMap()" class="w-6 h-6 rounded bg-black/50 text-blue-400 flex items-center justify-center text-xs" title="Recenter on Vehicle">
+                            <i class="fa-solid fa-crosshairs"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="nav-map"></div>
+
+                <div class="mt-2 flex items-center justify-between text-[10px] px-2 text-gray-400">
+                    <span><i class="fa-solid fa-circle text-blue-500 text-[8px] mr-1"></i> Sterling Heights</span>
+                    <span><i class="fa-solid fa-diamond text-amber-400 text-[8px] mr-1"></i> PA Turnpike</span>
+                    <span><i class="fa-solid fa-flag-checkered text-emerald-400 text-[8px] mr-1"></i> Sewell, NJ</span>
+                </div>
+            </div>
+
+            <!-- Auto-Advancing Milestones Progress List -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-3 space-y-2">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
+                        <i class="fa-solid fa-route text-emerald-400"></i> Interactive Route Progress
+                    </h3>
+                    <span id="route-progress-percent" class="text-[10px] font-mono-num font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">0% Done</span>
+                </div>
+
+                <div id="milestones-container" class="space-y-2 pt-1">
+                    <!-- Populated dynamically via JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: VEEPEAK+ OBD II TELEMETRY, SVG BOOST/VAC, ENGINE FRICTION & LIVE WAVEFORMS -->
+        <section id="tab-obd" class="space-y-4 tab-content hidden">
+            
+            <!-- Veepeak Bluetooth Connection Control Header -->
+            <div class="bg-gradient-to-r from-blue-950 via-androidCard to-slate-900 border border-blue-500/30 rounded-2xl p-4 shadow-lg">
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center space-x-2.5">
+                        <div id="obd-icon-bg" class="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-400/40 flex items-center justify-center text-blue-400 text-lg">
+                            <i class="fa-solid fa-bluetooth-b"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                                Veepeak+ OBD II Direct <span id="obd-badge" class="bg-red-500/20 text-red-400 border border-red-500/30 text-[10px] px-2 py-0.5 rounded-full">Disconnected</span>
+                            </h3>
+                            <p class="text-[10px] text-gray-400" id="obd-device-info">Supports Veepeak OBDCheck BLE / BLE+ / ELM327</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <button id="btn-connect-obd" onclick="connectVeepeakOBD()" class="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 active:scale-95">
+                        <i class="fa-solid fa-plug"></i> Connect Veepeak+ BLE Hardware
+                    </button>
+                </div>
+            </div>
+
+            <!-- RICH SVG RADIAL GAUGE: BOOST / VACUUM & ENGINE FRICTION PARASITIC TORQUE -->
+            <div class="bg-gradient-to-br from-slate-900 via-androidCard to-blue-950 border border-blue-500/40 rounded-2xl p-4 text-center shadow-xl relative overflow-hidden">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-[10px] font-bold text-cyan-400 uppercase tracking-widest"><i class="fa-solid fa-gauge mr-1"></i> Manifold Pressure (Boost/Vac)</span>
+                    <span id="obd-boost-unit" class="text-[10px] font-bold font-mono-num text-cyan-300 uppercase bg-cyan-950 border border-cyan-500/30 px-2 py-0.5 rounded-lg">InHg (Vac)</span>
+                </div>
+
+                <!-- High-Def SVG Dial Canvas -->
+                <div class="relative w-56 h-36 mx-auto flex items-center justify-center">
+                    <svg class="w-full h-full" viewBox="0 0 200 120">
+                        <!-- Background Arc -->
+                        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#172030" stroke-width="14" stroke-linecap="round"/>
+                        <!-- Vacuum Arc (Blue) -->
+                        <path d="M 20 100 A 80 80 0 0 1 100 20" fill="none" stroke="#06b6d4" stroke-width="12" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="0" class="glow-cyan"/>
+                        <!-- Boost Arc (Amber/Red) -->
+                        <path d="M 100 20 A 80 80 0 0 1 180 100" fill="none" stroke="#f59e0b" stroke-width="12" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" id="svg-boost-arc" class="glow-amber"/>
+                        <!-- Needle Pointer -->
+                        <g id="svg-needle-group" transform="rotate(-90 100 100)" class="transition-transform duration-300 ease-out">
+                            <line x1="100" y1="100" x2="30" y2="100" stroke="#00f0ff" stroke-width="3" stroke-linecap="round"/>
+                            <circle cx="100" cy="100" r="7" fill="#00f0ff" stroke="#ffffff" stroke-width="2"/>
+                        </g>
+                    </svg>
+                    <!-- Digital Display overlay -->
+                    <div class="absolute bottom-1 left-0 right-0 text-center">
+                        <p id="obd-boost-val" class="text-3xl font-black text-white font-mono-num tracking-tight">-18.4</p>
+                    </div>
+                </div>
+
+                <div class="flex justify-between text-[9px] text-gray-400 font-mono-num px-4 mt-1">
+                    <span>-30 InHg</span>
+                    <span>0 PSI</span>
+                    <span>+20 PSI</span>
+                </div>
+            </div>
+
+            <!-- ENGINE FRICTION TORQUE (PID 01 54) & PARASITIC LOSS GAUGE -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-4 shadow-xl space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
+                        <i class="fa-solid fa-cogs text-amber-400"></i> Engine Friction Percent Torque (PID 0154)
+                    </h3>
+                    <span id="obd-friction-val" class="text-xs font-mono-num font-bold text-amber-400 bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 rounded-full">14% Parasitic Torque</span>
+                </div>
+
+                <p class="text-[10px] text-gray-400 leading-normal">
+                    Live engine internal mechanical friction & A/C compressor drag load. Turning A/C OFF drops friction torque by ~4-6%, maximizing highway fuel economy.
+                </p>
+
+                <!-- High Def Visual Friction Bar -->
+                <div class="w-full bg-black/60 h-4 rounded-xl overflow-hidden border border-white/10 p-0.5 relative">
+                    <div id="bar-friction" class="bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500 h-full w-[14%] rounded-lg transition-all duration-300"></div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-2 text-center text-[10px] pt-1 font-mono-num">
+                    <div class="bg-black/30 p-2 rounded-xl border border-white/5">
+                        <span class="text-gray-400 block text-[9px]">COMPRESSOR FRICTION</span>
+                        <span id="friction-ac-status" class="text-emerald-400 font-bold">A/C OFF (-4.2% Drag)</span>
+                    </div>
+                    <div class="bg-black/30 p-2 rounded-xl border border-white/5">
+                        <span class="text-gray-400 block text-[9px]">TARGET CRUISE EFFICIENCY</span>
+                        <span id="friction-eff-target" class="text-cyan-300 font-bold">Optimum RPM (2,100)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LIVE WAVEFORM TELEMETRY STREAM CANVAS CHART -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-3 shadow-xl space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-[10px] font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <i class="fa-solid fa-chart-line text-cyan-400"></i> Live Telemetry Waveform Stream
+                    </span>
+                    <span class="text-[9px] text-gray-400 font-mono-num">Real-Time Data Plot</span>
+                </div>
+                <div class="w-full h-28 bg-black/80 rounded-xl border border-white/10 overflow-hidden relative">
+                    <canvas id="telemetry-chart" class="w-full h-full"></canvas>
+                </div>
+                <div class="flex justify-between text-[9px] font-mono-num text-gray-400 px-1">
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-cyan-400 inline-block"></span> Boost / Vac</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> Engine Friction %</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span> Speed MPH</span>
+                </div>
+            </div>
+
+            <!-- Extended 4-Grid Diagnostic Cluster -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <!-- RPM -->
+                <div class="bg-androidCard border border-androidBorder p-3 rounded-2xl text-center">
+                    <p class="text-[9px] text-gray-400 uppercase font-semibold">Engine Speed</p>
+                    <p id="obd-rpm" class="text-xl font-black text-blue-400 font-mono-num my-1">0 <span class="text-[10px] font-normal text-gray-500">RPM</span></p>
+                    <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden">
+                        <div id="bar-rpm" class="bg-blue-500 h-full w-0 transition-all duration-300"></div>
+                    </div>
+                </div>
+
+                <!-- Speed -->
+                <div class="bg-androidCard border border-androidBorder p-3 rounded-2xl text-center">
+                    <p class="text-[9px] text-gray-400 uppercase font-semibold">Vehicle Speed</p>
+                    <p id="obd-speed" class="text-xl font-black text-emerald-400 font-mono-num my-1">0 <span class="text-[10px] font-normal text-gray-500">MPH</span></p>
+                    <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden">
+                        <div id="bar-speed" class="bg-emerald-500 h-full w-0 transition-all duration-300"></div>
+                    </div>
+                </div>
+
+                <!-- Engine Load -->
+                <div class="bg-androidCard border border-androidBorder p-3 rounded-2xl text-center">
+                    <p class="text-[9px] text-gray-400 uppercase font-semibold">Calculated Load</p>
+                    <p id="obd-load" class="text-xl font-black text-amber-400 font-mono-num my-1">0 <span class="text-[10px] font-normal text-gray-500">%</span></p>
+                    <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden">
+                        <div id="bar-load" class="bg-amber-500 h-full w-0 transition-all duration-300"></div>
+                    </div>
+                </div>
+
+                <!-- Coolant Temp -->
+                <div class="bg-androidCard border border-androidBorder p-3 rounded-2xl text-center">
+                    <p class="text-[9px] text-gray-400 uppercase font-semibold">Coolant Temp</p>
+                    <p id="obd-coolant" class="text-xl font-black text-cyan-400 font-mono-num my-1">0 <span class="text-[10px] font-normal text-gray-500">°F</span></p>
+                    <div class="w-full bg-black/50 h-1.5 rounded-full overflow-hidden">
+                        <div id="bar-coolant" class="bg-cyan-500 h-full w-0 transition-all duration-300"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 3: CO-PILOT, HEADS-UP ALERTS & GEMINI AI -->
+        <section id="tab-copilot" class="space-y-4 tab-content hidden">
+            <!-- Co-Pilot Banner -->
+            <div class="bg-gradient-to-r from-purple-950 via-androidCard to-slate-900 border border-purple-500/30 rounded-2xl p-4 shadow-lg">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                            <i class="fa-solid fa-robot text-purple-400"></i> Gemini AI Co-Pilot Feed
+                        </h3>
+                        <p class="text-[11px] text-purple-200 mt-0.5">Live highway cautions, tunnel speeds & PA Turnpike tips.</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="chk-copilot-active" checked onchange="toggleCopilotAlerts()" class="sr-only peer">
+                        <div class="w-9 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
+                    </label>
+                </div>
+
+                <!-- Ask Gemini Co-Pilot Prompt Box -->
+                <div class="mt-3.5 flex gap-2">
+                    <input type="text" id="copilot-input" placeholder="Ask e.g. Safest 24/7 rest stop near Sideling Hill..." class="flex-1 bg-black/40 border border-purple-500/30 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-400">
+                    <button onclick="askGeminiCopilot()" class="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl transition active:scale-95">
+                        Ask AI
+                    </button>
+                </div>
+
+                <div id="copilot-response" class="bg-black/50 border border-purple-500/30 rounded-xl p-3 text-xs text-purple-100 hidden mt-3 leading-relaxed">
+                    <!-- AI response injected here -->
+                </div>
+            </div>
+
+            <!-- Proactive Route Heads-Up Alert Stream -->
+            <div class="space-y-2.5">
+                <h4 class="text-xs font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+                    <i class="fa-solid fa-triangle-exclamation text-amber-400"></i> Active Road & Terrain Cautions
+                </h4>
+
+                <div id="copilot-alerts-feed" class="space-y-2">
+                    <!-- Dynamic Alert Feed Items -->
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 4: BUDGET BUDDY & REST STOP TIMER -->
+        <section id="tab-budget" class="space-y-4 tab-content hidden">
+            
+            <!-- Rest Stop Break Timer -->
+            <div class="bg-gradient-to-r from-emerald-950 via-androidCard to-slate-900 border border-emerald-500/30 rounded-2xl p-4 shadow-lg text-center">
+                <div class="flex justify-between items-center mb-1">
+                    <span class="text-[10px] font-bold uppercase text-emerald-400 tracking-wider"><i class="fa-solid fa-stopwatch mr-1"></i> Rapid Rest Stop Timer</span>
+                    <span class="text-[10px] text-gray-400">Goal: &lt; 15 Mins</span>
+                </div>
+                
+                <p id="timer-display" class="text-4xl font-black text-emerald-300 font-mono-num my-1">00:00</p>
+
+                <div class="flex justify-center gap-2 mt-2">
+                    <button onclick="startBreakTimer()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl active:scale-95 transition">
+                        <i class="fa-solid fa-play mr-1"></i> Start Stop
+                    </button>
+                    <button onclick="pauseBreakTimer()" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs rounded-xl active:scale-95 transition">
+                        <i class="fa-solid fa-pause mr-1"></i> Pause
+                    </button>
+                    <button onclick="resetBreakTimer()" class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold text-xs rounded-xl active:scale-95 transition">
+                        Reset
+                    </button>
+                </div>
+            </div>
+
+            <!-- Spending Summary & Logger -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
+                        <i class="fa-solid fa-wallet text-emerald-400"></i> Budget Buddy Expense Tracker
+                    </h3>
+                    <span id="budget-total" class="text-xs font-mono-num font-bold text-emerald-400 bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 rounded-full">$0.00 Spent</span>
+                </div>
+
+                <!-- Add Expense Form -->
+                <div class="grid grid-cols-3 gap-2 pt-1">
+                    <select id="input-exp-cat" class="bg-black/40 border border-androidBorder rounded-xl px-2 py-2 text-xs text-white focus:outline-none focus:border-blue-500">
+                        <option value="Fuel">⛽ Fuel</option>
+                        <option value="Cash Toll">💵 Cash Toll</option>
+                        <option value="Plate Toll">📷 Toll-by-Plate</option>
+                        <option value="Food/Snacks">🍔 Food/Snacks</option>
+                        <option value="Misc">🔧 Misc</option>
+                    </select>
+                    <input type="number" id="input-exp-amt" placeholder="Amount ($)" step="0.01" class="bg-black/40 border border-androidBorder rounded-xl px-2 py-2 text-xs text-white focus:outline-none focus:border-blue-500">
+                    <button onclick="addExpenseItem()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition active:scale-95">
+                        + Add Expense
+                    </button>
+                </div>
+
+                <div id="expense-list-container" class="space-y-2 pt-2 border-t border-white/5">
+                    <!-- Dynamic expense items -->
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 5: CUSTOMIZABLE CHECKLIST & CASH TOLLS -->
+        <section id="tab-prep" class="space-y-4 tab-content hidden">
+            <!-- Custom Checklist Section -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
+                        <i class="fa-solid fa-list-check text-blue-400"></i> Trip Prep Checklist
+                    </h3>
+                    <span id="checklist-count" class="text-[10px] bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-full font-mono-num">0/0</span>
+                </div>
+
+                <div id="checklist-container" class="space-y-2">
+                    <!-- Dynamic checklist items -->
+                </div>
+
+                <div class="flex items-center space-x-2 pt-2 border-t border-white/5">
+                    <input type="text" id="input-new-chk" placeholder="Add task (e.g., Have $5 cash ready for Whitman bridge)..." class="flex-1 bg-black/40 border border-androidBorder rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-blue-500">
+                    <button onclick="addChecklistItem()" class="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition active:scale-95">
+                        <i class="fa-solid fa-plus"></i> Add
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cash & Electronic Toll Breakdown Reference -->
+            <div class="bg-androidCard border border-androidBorder rounded-2xl p-4 space-y-2">
+                <h3 class="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-2">
+                    <i class="fa-solid fa-money-bill-wave"></i> Cash Tolls & Toll-By-Plate Guide
+                </h3>
+                <p class="text-xs text-gray-300 leading-relaxed">
+                    PA Turnpike uses electronic <strong>Toll-By-Plate</strong> (mailed invoice). Have exact cash ready for river bridges and local turnpikes.
+                </p>
+                <div class="space-y-1.5 text-xs pt-1">
+                    <div class="flex justify-between p-2 rounded-xl bg-black/20 border border-white/5">
+                        <span>PA Turnpike (Toll-By-Plate Invoice)</span>
+                        <span class="font-mono-num text-amber-400 font-bold">~$121.73</span>
+                    </div>
+                    <div class="flex justify-between p-2 rounded-xl bg-black/20 border border-white/5">
+                        <span>Walt Whitman Bridge (Westbound Entry)</span>
+                        <span class="font-mono-num text-emerald-400 font-bold">$5.00 Cash</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 6: NIGHT DRIVE HUD MODE -->
+        <section id="tab-hud" class="space-y-4 tab-content hidden text-center">
+            <div class="bg-black/90 border border-blue-500/30 rounded-2xl p-6 space-y-6 shadow-2xl">
+                <div class="flex justify-between items-center text-xs text-gray-400">
+                    <span>NIGHT HUD WINDSHIELD PROJECTION</span>
+                    <button onclick="toggleHUDMirror()" class="px-3 py-1 bg-blue-600/30 text-blue-400 border border-blue-400/30 rounded-lg text-[10px] font-bold active:scale-95">
+                        <i class="fa-solid fa-arrows-rotate mr-1"></i> Flip Mirror Mode
+                    </button>
+                </div>
+
+                <div id="hud-display-box" class="space-y-4 py-4 transition-transform duration-300">
+                    <div>
+                        <p class="text-[10px] text-gray-500 uppercase tracking-widest">GPS / TELEMETRY SPEED</p>
+                        <p id="hud-speed" class="text-6xl font-black text-emerald-400 font-mono-num">0 <span class="text-lg text-gray-500">MPH</span></p>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4 pt-4 border-t border-white/10">
+                        <div>
+                            <p class="text-[10px] text-gray-500 uppercase">BOOST / VAC</p>
+                            <p id="hud-boost" class="text-xl font-bold text-cyan-300 font-mono-num">-18.4 InHg</p>
+                        </div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 uppercase">DESTINATION ETA</p>
+                            <p id="hud-eta" class="text-xl font-bold text-purple-300 font-mono-num">2:15 AM</p>
+                            <p class="text-[10px] text-gray-400">Sewell, NJ</p>
+                        </div>
+                    </div>
+                </div>
+
+                <p class="text-[10px] text-gray-500 italic">Lay phone flat on dashboard beneath windshield for illuminated reflection.</p>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Android Bottom Navigation Toolbar -->
+    <nav class="fixed bottom-0 left-0 right-0 glass-panel border-t border-androidBorder px-1 py-2 flex justify-around items-center z-40">
+        <button onclick="switchTab('nav')" id="nav-btn-nav" class="flex flex-col items-center justify-center w-12 py-1 text-blue-400 transition">
+            <i class="fa-solid fa-map-location-dot text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">Nav/Map</span>
+        </button>
+
+        <button onclick="switchTab('obd')" id="nav-btn-obd" class="flex flex-col items-center justify-center w-12 py-1 text-gray-400 hover:text-gray-200 transition relative">
+            <span id="nav-obd-ping" class="hidden absolute top-1 right-2 w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+            <i class="fa-solid fa-gauge-high text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">Veepeak+</span>
+        </button>
+
+        <button onclick="switchTab('copilot')" id="nav-btn-copilot" class="flex flex-col items-center justify-center w-12 py-1 text-gray-400 hover:text-gray-200 transition relative">
+            <i class="fa-solid fa-robot text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">Co-Pilot</span>
+        </button>
+
+        <button onclick="switchTab('budget')" id="nav-btn-budget" class="flex flex-col items-center justify-center w-12 py-1 text-gray-400 hover:text-gray-200 transition">
+            <i class="fa-solid fa-wallet text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">Budget</span>
+        </button>
+
+        <button onclick="switchTab('prep')" id="nav-btn-prep" class="flex flex-col items-center justify-center w-12 py-1 text-gray-400 hover:text-gray-200 transition">
+            <i class="fa-solid fa-clipboard-check text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">Prep</span>
+        </button>
+
+        <button onclick="switchTab('hud')" id="nav-btn-hud" class="flex flex-col items-center justify-center w-12 py-1 text-gray-400 hover:text-gray-200 transition">
+            <i class="fa-solid fa-display text-base mb-0.5"></i>
+            <span class="text-[9px] font-medium">HUD</span>
+        </button>
+    </nav>
+
+    <script>
+        // Route Coordinates & Milestones
+        const routePoints = [
+            { lat: 42.6167, lng: -83.0462, name: 'Sterling Heights Work', step: 1, limit: 70 },
+            { lat: 41.6528, lng: -83.5379, name: 'Toledo / OH Turnpike', step: 2, limit: 70 },
+            { lat: 41.1000, lng: -80.6500, name: 'Youngstown Gas Stop 1', step: 3, limit: 70 },
+            { lat: 41.0000, lng: -80.5186, name: 'PA Turnpike Entry', step: 4, limit: 70 },
+            { lat: 40.0167, lng: -78.0833, name: 'Sideling Hill Plaza Stop 2', step: 5, limit: 65 },
+            { lat: 39.9056, lng: -75.1294, name: 'Walt Whitman Bridge ($5 Cash)', step: 6, limit: 55 },
+            { lat: 39.7662, lng: -75.0972, name: 'Sewell, NJ Destination', step: 7, limit: 65 }
+        ];
+
+        const milestonesList = [
+            { id: 1, title: "Work Clock Out (Sterling Heights)", dist: "0 Mi", desc: "Clock out at 4:30 PM. Take I-696 E to I-94 E / I-75 S toward Toledo.", done: false, active: true },
+            { id: 2, title: "Toledo / OH Turnpike (I-80/I-76 E)", dist: "60 Mi", desc: "Merge onto OH Turnpike. Traffic clears past Toledo.", done: false, active: false },
+            { id: 3, title: "Stop 1: Youngstown Gas & Stretch", dist: "215 Mi", desc: "10-15 Min Stop near OH/PA border. Top off fuel.", done: false, active: false },
+            { id: 4, title: "Enter PA Turnpike (I-76 E)", dist: "225 Mi", desc: "A/C compressor OFF for cool mountain air efficiency.", done: false, active: false },
+            { id: 5, title: "Stop 2: Sideling Hill Service Plaza", dist: "420 Mi", desc: "10-15 Min Stop. Fuel top-off & windshield bug wash.", done: false, active: false },
+            { id: 6, title: "Walt Whitman Bridge ($5 Cash Toll)", dist: "580 Mi", desc: "Cross into NJ. Have $5.00 cash ready for bridge lane.", done: false, active: false },
+            { id: 7, title: "Arrival: Sewell, NJ", dist: "626 Mi", desc: "Destination: 201 Hillary Lane, Sewell, NJ.", done: false, active: false }
+        ];
+
+        // Editable Checklist State
+        let checklistData = [
+            { id: 1, text: "Bring $10-$20 cash for Walt Whitman bridge toll lane", checked: false },
+            { id: 2, text: "Pack bags into car Thursday morning before heading to work", checked: false },
+            { id: 3, text: "Plug Veepeak+ OBD II Bluetooth dongle into vehicle port", checked: false },
+            { id: 4, text: "Set tire pressures to cold PSI recommendation", checked: false },
+            { id: 5, text: "Verify PA Turnpike Toll-by-Plate license plate registered", checked: false }
+        ];
+
+        // Active State
+        let isTripActive = false;
+        let isVoiceEnabled = true;
+        let isCopilotActive = true;
+        let isHUDMirrored = false;
+        let map = null;
+        let mapPolyline = null;
+        let vehicleMarker = null;
+        let currentStepIndex = 0;
+        let obdInterval = null;
+        let breakTimerInterval = null;
+        let breakTimerSeconds = 0;
+
+        // Veepeak Bluetooth Hardware Connection & ELM327 Protocol
+        let bluetoothDevice = null;
+        let gattServer = null;
+        let txCharacteristic = null;
+        let rxCharacteristic = null;
+        let obdRxBuffer = "";
+        const textDecoder = new TextDecoder('utf-8');
+        const textEncoder = new TextEncoder();
+
+        // PID polling queue: RPM, Speed, Load, Coolant, MAP (Boost/Vac), Engine Friction Torque (PID 01 54)
+        const pidList = ['010C', '010D', '0104', '0105', '010B', '0154'];
+        let activePidIndex = 0;
+        let isWaitingForPidResponse = false;
+
+        // Telemetry Data
+        let telemetry = {
+            rpm: 0,
+            speed: 0,
+            load: 0,
+            coolant: 32,
+            mapKpa: 101.3,
+            boostPsi: 0,
+            frictionTorquePct: 0,
+            mpgDelta: 0.0,
+            distRemaining: 626
+        };
+
+        // Telemetry History Array for Canvas Charting
+        let chartData = {
+            boost: new Array(40).fill(0),
+            friction: new Array(40).fill(0),
+            speed: new Array(40).fill(0)
+        };
+
+        let expenseList = [
+            { id: 1, cat: 'Cash Toll', amt: 5.00, desc: 'Walt Whitman Bridge Reserve' }
+        ];
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initMap();
+            renderMilestones();
+            renderChecklist();
+            renderExpenses();
+            initGPSWatcher();
+            updateLiveClock();
+            setInterval(updateLiveClock, 1000);
+            renderCopilotAlerts();
+            initTelemetryChart();
+            initPWAandServiceWorker();
+        });
+
+        // Android PWA & Service Worker Initialization
+        let deferredPrompt = null;
+
+        function initPWAandServiceWorker() {
+            // Listen for Android PWA Install Prompt
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                deferredPrompt = e;
+                const installBtn = document.getElementById('btn-pwa-install');
+                if (installBtn) installBtn.classList.remove('hidden');
+            });
+
+            // Register Inline Service Worker for Offline Caching
+            if ('serviceWorker' in navigator) {
+                const swCode = `
+                    const CACHE_NAME = 'roadtrip-obd-v1';
+                    self.addEventListener('install', (e) => {
+                        self.skipWaiting();
+                    });
+                    self.addEventListener('activate', (e) => {
+                        e.waitUntil(clients.claim());
+                    });
+                    self.addEventListener('fetch', (e) => {
+                        e.respondWith(
+                            caches.match(e.request).then((res) => res || fetch(e.request).catch(() => res))
+                        );
+                    });
+                `;
+                const blob = new Blob([swCode], { type: 'application/javascript' });
+                const swUrl = URL.createObjectURL(blob);
+                navigator.serviceWorker.register(swUrl).catch(err => console.log('SW registration skipped:', err));
+            }
+        }
+
+        async function installAndroidPWA() {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    showToast("Installing app on home screen...");
+                }
+                deferredPrompt = null;
+                document.getElementById('btn-pwa-install').classList.add('hidden');
+            } else {
+                showToast("Tap browser menu (⋮) -> 'Add to Home screen'");
+            }
+        }
+
+        function initMap() {
+<!-- ... existing code -->
