@@ -1,0 +1,27 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>scene lab</title>
+<style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
+body{margin:0;background:#222;color:#ddd;font:12px sans-serif}#g{display:grid;grid-template-columns:repeat(4,390px);gap:6px;padding:6px}figure{margin:0;position:relative}figcaption{position:absolute;left:6px;top:6px;background:#000a;padding:2px 6px;border-radius:4px;z-index:2}canvas{display:block}</style></head><body><div id="g"></div>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/scene.js"></script><script src="fixture.js"></script>
+<script>
+const E=MP.fixture.curvyRoute({east:true}), Wst=MP.fixture.curvyRoute({east:false});
+const T=(h,m,d=8)=>Date.UTC(2026,9,d,h+4,m); // EDT = UTC-4, Oct 8 2026
+const cases=[
+ ['07:52 sunrise, eastbound, glare',E,T(7,52),{cloud:.1},[]],
+ ['12:30 midday, partly cloudy',E,T(12,30),{cloud:.45},[{kind:'service',d:150,text:'GAS · FOOD',sub:'SHEETZ 2 MI',side:'right'}]],
+ ['18:20 golden hour, westbound glare',Wst,T(18,20),{cloud:.25},[]],
+ ['18:52 dusk, westbound',Wst,T(18,52),{cloud:.3},[{kind:'gantry',d:130,text:'EXIT 215',sub:'Youngstown',arrow:35}]],
+ ['21:00 night, clear (stars)',E,T(21,0),{cloud:.05},[{kind:'service',d:110,text:'REST AREA',sub:'3 MI',side:'right'}]],
+ ['05:20 waning crescent moon',E,T(5,20,9),{cloud:.05},[{kind:'story',d:140,text:'HISTORIC',sub:'MARKER 1 MI',side:'left'}]],
+ ['22:30 night rain, stormy',E,T(22,30),{cloud:.9,kind:'rain',precip:.8},[]],
+ ['06:50 dense fog at dawn',E,T(6,50),{cloud:.5,kind:'fog',fog:.85},[]],
+];
+const g=document.getElementById('g');
+cases.forEach(([name,route,ms,wx,signs],i)=>{
+  const f=document.createElement('figure'); f.innerHTML='<figcaption>'+name+'</figcaption>'; const c=document.createElement('canvas'); f.appendChild(c); g.appendChild(f);
+  const sc=new MP.Scene(c); sc.resize(390,560,1);
+  const along=i==2||i==3?6900:7000; const p=route.pointAt(along);
+  const render=()=>sc.render({ms,lat:p.lat,lng:p.lng,heading:p.bearing,along,route,speed:29,wx,elevAt:route.fixtureElevAt,signs,hy:215},0.033);
+  render(); if(i==0) window.__r=render; 
+});
+window.__done=true;
+</script></body></html>

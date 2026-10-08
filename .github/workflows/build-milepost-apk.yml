@@ -1,0 +1,44 @@
+name: Build Milepost APK
+
+# Builds the Android test APK on GitHub's servers (which have the Android SDK) every time the app changes.
+# Get it from: the "Milepost (latest test build)" pre-release  →  Milepost-debug.apk
+#          or: this run's artifacts → Milepost-debug-apk
+
+on:
+  push:
+    branches: ['claude/**', main]
+    paths: ['milepost/**', 'android/**', '.github/workflows/build-milepost-apk.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.9' }
+      - name: Bundle the web app into the APK
+        run: |
+          rm -rf android/app/src/main/assets/milepost
+          mkdir -p android/app/src/main/assets
+          cp -r milepost android/app/src/main/assets/milepost
+          rm -rf android/app/src/main/assets/milepost/tests
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Milepost-debug.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: Milepost-debug-apk, path: Milepost-debug.apk }
+      - name: Publish as the rolling "latest test build" pre-release
+        env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+        run: |
+          gh release delete milepost-latest --yes --cleanup-tag || true
+          gh release create milepost-latest Milepost-debug.apk --prerelease --target "$GITHUB_SHA" \
+            --title "Milepost (latest test build)" \
+            --notes "Debug-signed test build of commit ${GITHUB_SHA::7}. Install by opening Milepost-debug.apk on your Android phone (allow installs from your browser/files app when asked). Not a store release."
