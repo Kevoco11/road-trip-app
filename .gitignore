@@ -1,0 +1,8 @@
+# Android build outputs (the web app is copied into assets/ at build time; see scripts/build-apk.sh)
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/assets/
+android/local.properties
+*.apk
+node_modules/

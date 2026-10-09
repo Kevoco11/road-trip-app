@@ -1,0 +1,44 @@
+name: Build Trippin' APK
+
+# Builds the Android test APK on GitHub's servers (which have the Android SDK) every time the app changes.
+# Get it from: the "Trippin' (latest test build)" pre-release  →  Trippin-debug.apk
+#          or: this run's artifacts → Trippin-debug-apk
+
+on:
+  push:
+    branches: ['claude/**', main]
+    paths: ['trippin/**', 'android/**', '.github/workflows/build-trippin-apk.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.9' }
+      - name: Bundle the web app into the APK
+        run: |
+          rm -rf android/app/src/main/assets/trippin
+          mkdir -p android/app/src/main/assets
+          cp -r trippin android/app/src/main/assets/trippin
+          rm -rf android/app/src/main/assets/trippin/tests
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Trippin-debug.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: Trippin-debug-apk, path: Trippin-debug.apk }
+      - name: Publish as the rolling "latest test build" pre-release
+        env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+        run: |
+          gh release delete trippin-latest --yes --cleanup-tag || true
+          gh release create trippin-latest Trippin-debug.apk --prerelease --target "$GITHUB_SHA" \
+            --title "Trippin' (latest test build)" \
+            --notes "Debug-signed test build of commit ${GITHUB_SHA::7}. Install by opening Trippin-debug.apk on your Android phone (allow installs from your browser/files app when asked). Not a store release."

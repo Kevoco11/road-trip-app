@@ -1,13 +1,13 @@
 plugins { id 'com.android.application' }
 android {
-    namespace 'app.milepost'
+    namespace 'app.trippin'
     compileSdk 34
     defaultConfig {
-        applicationId 'app.milepost'
+        applicationId 'app.trippin'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 2
+        versionName '0.2.0'
     }
     // A fixed, public DEBUG key so new test builds install over old ones. Not for store release.
     signingConfigs {

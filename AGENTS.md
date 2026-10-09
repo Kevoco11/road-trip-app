@@ -40,25 +40,25 @@ vanilla JS. There is no backend, build step, package manager, or dependencies.
   benign, caught `TypeError`; the app functions normally regardless.
 
 
-## Milepost (`milepost/`) — the second, separate app
+## Trippin' (`trippin/`) — the second, separate app
 
 A from-scratch rebuild of the road-trip cockpit that lives beside the original (`index.html` is untouched).
-Static files only, no build step, no runtime dependencies. Serve the repo root and open `/milepost/index.html`.
+Static files only, no build step, no runtime dependencies. Serve the repo root and open `/trippin/index.html`.
 
 - **Idea:** the UI speaks the road's own visual language. Drive is a live *windshield* (road curvature/hills from the
   route, sun and moon at their true positions, weather, exit gantries), a dark dashboard cluster, a dot-matrix message
   board, a split-flap ETA, and a nav bar styled as a highway sign. Ahead is a strip map with the **Pit Window** (fuel ·
   alertness · daylight · weather on one clock) and **Future You** (drag to time-travel the whole trip). Car is a real
   ELM327/BLE OBD dashboard with a **Black Box** pre-trigger recorder and **Pace Lab** (this car's own speed-vs-economy curve).
-- **Same rule as the original:** real data only. No simulated telemetry in the shipped app. `milepost/tests/` holds
+- **Same rule as the original:** real data only. No simulated telemetry in the shipped app. `trippin/tests/` holds
   test-only fixtures/emulators (ELM327 emulator, a curvy fixture route) — never loaded by `index.html`.
 - **Layout:** `js/core.js` (geo/route/sun/units), `engine.js` (state machine: GPS, ETA, stops, alertness, fuel),
   `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield renderer), `map.js` (canvas map),
   `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), `drive.js`/`ahead.js`/`car.js`/`trip.js` (screens).
-- **Tests:** `node milepost/tests/unit.js` and `node milepost/tests/obd.test.js` (no dependencies).
+- **Tests:** `node trippin/tests/unit.js` and `node trippin/tests/obd.test.js` (no dependencies).
 - **Not built yet:** Pilot tab (alerts feed, Sky Dial, voice, Roadside Stories), full Trip planner (search/OSRM/Open-Meteo/
   Overpass clients), recap poster. `js/intel.js` currently holds only the elevation/weather accessors.
-- **Android APK:** `android/` is a thin WebView shell (bundles `milepost/` as assets; native BLE bridge for the OBD adapter
-  because WebView has no Web Bluetooth). `.github/workflows/build-milepost-apk.yml` builds it on GitHub and publishes the
-  "Milepost (latest test build)" pre-release. It is debug-signed with the fixed public key `android/debug.keystore`
+- **Android APK:** `android/` is a thin WebView shell (bundles `trippin/` as assets; native BLE bridge for the OBD adapter
+  because WebView has no Web Bluetooth). `.github/workflows/build-trippin-apk.yml` builds it on GitHub and publishes the
+  "Trippin' (latest test build)" pre-release. It is debug-signed with the fixed public key `android/debug.keystore`
   (test builds only). The build could not be run in the Cursor Cloud container (no Android SDK / dl.google.com blocked).
