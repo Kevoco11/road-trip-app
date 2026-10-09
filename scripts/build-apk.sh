@@ -9,4 +9,5 @@ cp -r trippin android/app/src/main/assets/trippin
 rm -rf android/app/src/main/assets/trippin/tests
 (cd android && gradle --no-daemon -q assembleDebug)
 cp android/app/build/outputs/apk/debug/app-debug.apk Trippin-debug.apk
+mkdir -p dist && cp Trippin-debug.apk dist/Trippin-debug.apk   # always keep a local copy in dist/
 echo "Built $(pwd)/Trippin-debug.apk ($(du -h Trippin-debug.apk | cut -f1))"

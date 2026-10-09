@@ -44,9 +44,14 @@
     nodes.timeBtn = h('button.chip', { onclick: () => { timeMode = !timeMode; nodes.timeBtn.classList.toggle('on', timeMode); A.rebuild(true); } }, icon('clock'), 'Time lens');
     const chip = (key, label) => h('button.chip.on', { onclick: (e) => { filters[key] = !filters[key]; e.currentTarget.classList.toggle('on', filters[key]); A.rebuild(true); } }, label);
     nodes.filters = h('div.chips', chip('fuel', 'Fuel'), chip('rest', 'Rest'), chip('wx', 'Weather'), chip('sun', 'Sun'), chip('toll', 'Tolls'));
-    el.append(h('div.lens-bar', nodes.lensSeg, nodes.timeBtn), nodes.filters);
+    nodes.lensBar = h('div.lens-bar', nodes.lensSeg, nodes.timeBtn);
+    el.append(nodes.lensBar, nodes.filters);
 
-    nodes.strip = h('div.strip'); nodes.empty = h('p.muted', { style: { padding: '30px 0' } }, 'Plan a route in the Trip tab to see the road ahead.');
+    nodes.strip = h('div.strip');
+    nodes.emptyCard = h('section.card.ahead-empty', { hidden: true }, h('div.card-h', h('h3', icon('ahead'), 'No trip planned')),
+      h('p.muted', 'Ahead shows your whole route as one road: exits, fuel and rest stops, tolls, weather and daylight at the time you will be there, plus the Pit Window that tells you when to stop.'),
+      h('button.btn.primary', { style: { marginTop: '12px' }, onclick: () => MP.go('trip') }, icon('route'), 'Plan a trip'));
+    el.insertBefore(nodes.emptyCard, nodes.dossier);
     el.append(nodes.strip);
     MP.bus.on('route', () => { builtKey = ''; if (!el.hidden) A.rebuild(); });
     MP.bus.on('future', () => { if (!el.hidden) { A.refreshPit(); } });
@@ -161,7 +166,9 @@
     if (!force && key === builtKey) { A.refreshPit(); return; }
     builtKey = key;
     nodes.strip.replaceChildren();
-    if (!r) { nodes.strip.append(nodes.empty); return; }
+    const has = !!r;
+    nodes.emptyCard.hidden = has; nodes.pitCard.hidden = nodes.lensBar.hidden = nodes.filters.hidden = nodes.dossier.hidden = !has;
+    if (!r) { nodes.title.textContent = 'Ahead'; nodes.shields.replaceChildren(); nodes.sub.textContent = 'Nothing planned yet'; return; }
     // header
     const p = S.plan || {};
     nodes.title.textContent = ((p.from ? p.from.name.split(',')[0] : 'Start') + ' → ' + (p.to ? p.to.name.split(',')[0] : 'End'));

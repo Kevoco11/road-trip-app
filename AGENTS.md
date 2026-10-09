@@ -44,21 +44,37 @@ vanilla JS. There is no backend, build step, package manager, or dependencies.
 
 A from-scratch rebuild of the road-trip cockpit that lives beside the original (`index.html` is untouched).
 Static files only, no build step, no runtime dependencies. Serve the repo root and open `/trippin/index.html`.
+There is **no built-in trip**: you plan any trip in the Trip tab (place search → real OSRM routes), or press START on Drive
+for a **free drive** with no destination (the windshield shows a straight road along your GPS heading).
 
-- **Idea:** the UI speaks the road's own visual language. Drive is a live *windshield* (road curvature/hills from the
-  route, sun and moon at their true positions, weather, exit gantries), a dark dashboard cluster, a dot-matrix message
-  board, a split-flap ETA, and a nav bar styled as a highway sign. Ahead is a strip map with the **Pit Window** (fuel ·
-  alertness · daylight · weather on one clock) and **Future You** (drag to time-travel the whole trip). Car is a real
-  ELM327/BLE OBD dashboard with a **Black Box** pre-trigger recorder and **Pace Lab** (this car's own speed-vs-economy curve).
-- **Same rule as the original:** real data only. No simulated telemetry in the shipped app. `trippin/tests/` holds
-  test-only fixtures/emulators (ELM327 emulator, a curvy fixture route) — never loaded by `index.html`.
-- **Layout:** `js/core.js` (geo/route/sun/units), `engine.js` (state machine: GPS, ETA, stops, alertness, fuel),
-  `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield renderer), `map.js` (canvas map),
-  `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), `drive.js`/`ahead.js`/`car.js`/`trip.js` (screens).
-- **Tests:** `node trippin/tests/unit.js` and `node trippin/tests/obd.test.js` (no dependencies).
-- **Not built yet:** Pilot tab (alerts feed, Sky Dial, voice, Roadside Stories), full Trip planner (search/OSRM/Open-Meteo/
-  Overpass clients), recap poster. `js/intel.js` currently holds only the elevation/weather accessors.
-- **Android APK:** `android/` is a thin WebView shell (bundles `trippin/` as assets; native BLE bridge for the OBD adapter
-  because WebView has no Web Bluetooth). `.github/workflows/build-trippin-apk.yml` builds it on GitHub and publishes the
-  "Trippin' (latest test build)" pre-release. It is debug-signed with the fixed public key `android/debug.keystore`
-  (test builds only). The build could not be run in the Cursor Cloud container (no Android SDK / dl.google.com blocked).
+- **Idea:** the UI speaks the road's own visual language. Drive is a live *windshield* (road curvature/hills from the route,
+  sun and moon at their true positions, weather, exit gantries), a dark dashboard cluster, a dot-matrix message board, a
+  split-flap ETA, and a nav bar styled as a highway sign. Ahead is a strip map with the **Pit Window** (fuel · alertness ·
+  daylight · weather on one clock) and **Future You** (drag to time-travel the trip). Car is a real ELM327/BLE OBD dashboard with
+  a **Black Box** recorder and **Pace Lab**. Pilot has alerts, the **Sky Dial**, voice/text questions and roadside stories.
+- **Same rule as the original:** real data only. No simulated telemetry in the shipped app. `trippin/tests/` holds test-only
+  fixtures/emulators — never loaded by `index.html`. Anything unknown is shown as unknown ("unavailable", "—"), never guessed.
+- **Layout (`trippin/js/`):** `core.js` (geo/route/sun/units/storage), `engine.js` (state machine: GPS, ETA, stops, alertness,
+  fuel), `plan.js` (trip plan model), `intel.js` (all network clients, see below), `voice.js` (TTS, speech recognition, command
+  parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield), `map.js` (canvas map),
+  `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), screens: `drive.js` `ahead.js` `car.js` `pilot.js` `trip.js`,
+  plus `hud.js` (dash-top display), `recap.js` (shareable poster), `diag.js` (error capture + "Share report"), `app.js` (boot).
+- **Public services (all keyless, all with fallbacks and status tracking in `MP.intel.status`):** routing OSRM
+  (router.project-osrm.org → routing.openstreetmap.de), search Nominatim → Photon → Open-Meteo geocoder, weather + elevation
+  Open-Meteo (OpenTopoData fallback), fuel/rest stops Overpass (several mirrors), stories Wikipedia, warnings US NWS,
+  tiles CARTO. The demo OSRM server sends no `toll` class, so toll roads are *inferred from road names* and labelled "likely".
+  Trip → Health check runs a live test of every service on the device.
+- **Tests (no dependencies):** `node trippin/tests/unit.js`, `node trippin/tests/obd.test.js`, `node trippin/tests/intel.test.js`
+  (parsers against real captured fixtures in `tests/fixtures/`, retry/fallback behaviour with a fake `fetch`, voice commands,
+  alert rules, recap). `node trippin/tests/live.js "Toledo, OH" "Pittsburgh, PA"` exercises the REAL services end to end
+  (set `NODE_USE_ENV_PROXY=1` behind a proxy). Browser checks: Playwright + Chromium can drive the app with a phone viewport;
+  move the simulated GPS with `context.setGeolocation` (test harness input only).
+- **Android APK:** `android/` is a thin WebView shell (bundles `trippin/` as assets; native BLE for the OBD adapter because
+  WebView has no Web Bluetooth; native TTS, speech recognition, share/save, keep-awake, Back-button handling). Build locally with
+  `scripts/build-apk.sh` (needs JDK 17+, `ANDROID_HOME` with platform 34 + build-tools 34.0.0, Gradle 8.x → `Trippin-debug.apk`).
+  `.github/workflows/build-trippin-apk.yml` runs the tests, builds on GitHub and publishes the rolling **"Trippin' (latest test
+  build)"** pre-release (`trippin-latest`). It is debug-signed with the fixed public key `android/debug.keystore` (test builds
+  only; new builds install over old ones). Cloud-container note: `dl.google.com` and the public APIs must be allowed in the
+  environment's network settings to build/test here; Maven Central may answer 429 on the first Gradle run — just retry.
+- **Not verified on hardware:** the native Bluetooth, speech and GPS bridges are compile-checked and exercised through the web
+  paths, but have not been run on a phone with an OBD adapter yet.
