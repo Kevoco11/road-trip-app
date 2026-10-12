@@ -1,6 +1,6 @@
 /* Trippin' map engine — a small canvas renderer, no libraries.
  *
- *  - Web-mercator raster tiles (CARTO light/dark) when online, cached by the service worker.
+ *  - Web-mercator raster tiles (Esri Canvas light/dark gray) when online, cached by the service worker.
  *  - A "blueprint" graticule is always drawn underneath, so the route reads clearly with no
  *    signal at all (mountains, tunnels, dead zones).
  *  - Heading-up rotation; the 3D "chase cam" look is a CSS perspective tilt on the canvas.
@@ -90,10 +90,13 @@
     metersPerPx(zoom, lat) { return (156543.03392 * Math.cos(lat * D2R)) / Math.pow(2, zoom); }
 
     /* ------------------------------------------------------------- tiles */
+    /* Keyless Esri "Canvas" basemaps (clean gray, no labels — matches the night/day themes).
+     * They only exist up to level 16; deeper levels return a "map data not yet available" placeholder,
+     * so we never request them (render() clamps the tile level and scales the level-16 tiles up).
+     * CARTO's free tiles used to live here; they now answer every tile with an "API KEY REQUIRED" image. */
     _tileURL(z, x, y) {
-      const sub = 'abcd'[(x + y) % 4];
-      const style = this.tileStyle === 'light' ? 'rastertiles/voyager_nolabels' : 'dark_nolabels';
-      return 'https://' + sub + '.basemaps.cartocdn.com/' + style + '/' + z + '/' + x + '/' + y + (this.dpr >= 2 ? '@2x' : '') + '.png';
+      const base = this.tileStyle === 'light' ? 'World_Light_Gray_Base' : 'World_Dark_Gray_Base';
+      return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/' + base + '/MapServer/tile/' + z + '/' + y + '/' + x;
     }
     _getTile(z, x, y) {
       const key = this.tileStyle + '/' + z + '/' + x + '/' + y;
@@ -102,12 +105,18 @@
         if (t.state === 'err' && Date.now() - t.at > 20000) { this.tiles.delete(key); t = null; }
         else { this.tiles.delete(key); this.tiles.set(key, t); return t; } // LRU bump
       }
-      const img = new Image();
+      const img = new Image(), url = this._tileURL(z, x, y);
       t = { img, state: 'load', at: Date.now() };
       img.onload = () => { t.state = 'ok'; this.dirty = true; };
-      img.onerror = () => { t.state = 'err'; t.at = Date.now(); };
+      img.onerror = () => {
+        // A CORS-less error response (edge hiccup) must not blank the tile: retry once as a plain image.
+        // The map canvas is never read back, so an opaque image is fine to draw.
+        if (img.crossOrigin) { img.removeAttribute('crossorigin'); img.src = url + (url.indexOf('?') < 0 ? '?' : '&') + 'r=1'; return; }
+        t.state = 'err'; t.at = Date.now();
+      };
       img.decoding = 'async';
-      img.src = this._tileURL(z, x, y);
+      img.crossOrigin = 'anonymous'; // CORS response → the service worker can cache it (opaque no-cors responses are not cacheable)
+      img.src = url;
       this.tiles.set(key, t);
       if (this.tiles.size > 420) { const k = this.tiles.keys().next().value; this.tiles.delete(k); }
       return t;
@@ -180,7 +189,7 @@
       const ctx = this.ctx, W = this.W, H = this.H, dpr = this.dpr, cam = this.cam, col = this.colors;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = col.bg; ctx.fillRect(0, 0, W, H);
-      const zi = util.clamp(Math.round(cam.zoom), 3, 17), s = Math.pow(2, cam.zoom - zi), size = 256 * Math.pow(2, zi);
+      const zi = util.clamp(Math.round(cam.zoom), 3, MapView.MAX_TILE_ZOOM), s = Math.pow(2, cam.zoom - zi), size = 256 * Math.pow(2, zi);
       const cx = geo.mercX(cam.lng) * size, cy = geo.mercY(cam.lat) * size;
       const R = Math.hypot(Math.max(this.ax, W - this.ax), Math.max(this.ay, H - this.ay)) / s;
       ctx.save();
@@ -350,5 +359,6 @@
     }
   }
 
+  MapView.MAX_TILE_ZOOM = 16; // deepest level the tile provider serves (see _tileURL)
   MP.MapView = MapView;
 })(typeof window !== 'undefined' ? window : globalThis);

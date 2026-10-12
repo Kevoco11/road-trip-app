@@ -115,7 +115,7 @@
       h('div.es-t', 'Where to?'),
       h('p', 'Plan a route for live directions, weather, fuel stops and your Pit Window — or just start driving and use Trippin\' as a live dashboard.'),
       h('div.es-actions', h('button.btn.primary', { onclick: () => MP.go('trip') }, icon('route'), 'Plan a trip'), h('button.btn', { onclick: () => D.toggleTrip() }, icon('drive'), 'Free drive'))));
-    nodes.attrib = h('div.attrib', { hidden: true }, '© OpenStreetMap contributors · © CARTO');
+    nodes.attrib = h('div.attrib', { hidden: true }, 'Map © Esri, HERE, Garmin, OpenStreetMap contributors');
     el.append(stage, topbar, nodes.preview, nodes.maneuver, nodes.tools, nodes.speedo, nodes.empty, nodes.attrib, nodes.cluster);
 
     new ResizeObserver(() => D.layout()).observe(el);
