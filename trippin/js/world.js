@@ -90,6 +90,7 @@
         const m = table ? table[ft.props[key]] : null;
         const kind = layer === 'water' ? ['water', 9] : layer === 'park' ? ['park', 3] : m;
         if (!kind) continue;
+        if (layer === 'water' && ft.props.class === 'swimming_pool') continue; // backyard pools are far smaller than the terrain grid
         for (const p of ft.polys || []) out.covers.push({ kind: KIND[kind[0]], p: kind[1], outer: f32(p.outer, true), holes: p.holes.map((h) => f32(h, true)), bb: polyBBox(p.outer), cls: ft.props.class || kind[0] });
       }
     };

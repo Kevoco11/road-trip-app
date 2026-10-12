@@ -38,6 +38,7 @@
       L.push('Prefs: ' + JSON.stringify(p));
     }
     if (MP.intel) L.push('Services: ' + Object.entries(MP.intel.status).map(([k, v]) => k + '=' + (v.ok ? 'ok ' + v.ms + 'ms' : 'FAIL ' + v.err)).join(' · '));
+    if (MP.glworld) { const g = MP.glworld, w = MP.world; L.push('Windshield: ' + (g.ok ? 'WebGL2 ok · depth ' + g.depthBits + ' bit · quality ' + g.quality + '/2 · built ' + (g.stats.built || 0) + ' chunks (last ' + (g.stats.lastBuildMs || 0) + ' ms) · ' + Math.round(g.stats.tris || 0) + ' tris' : g.failed ? 'WebGL unavailable (' + g.lastErr + ') → flat road' : 'not started') + (w ? ' · scenery tiles ' + (w.status.tiles || 0) + ' ' + w.status.state + (w.status.err ? ' (' + w.status.err + ')' : '') : '')); }
     if (MP.obd && MP.obd.log && MP.obd.log.length) L.push('Adapter log (last 15):\n  ' + MP.obd.log.slice(-15).join('\n  '));
     L.push('Errors (' + D.errors.length + '):' + (D.errors.length ? '\n  ' + D.errors.slice(-30).map((e) => new Date(e.t).toISOString().slice(11, 19) + ' [' + e.kind + '] ' + e.msg).join('\n  ') : ' none'));
     return L.join('\n');

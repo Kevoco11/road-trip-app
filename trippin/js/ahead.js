@@ -102,11 +102,11 @@
     nodes.fyRows.replaceChildren(...rows.map(([k, v]) => h('div.fy', h('span.k', k), h('b', v))));
     nodes.showBtn.hidden = cursor == null;
     // thumbnail windshield
-    if (!thumb) { thumb = new MP.Scene(nodes.fyThumb); }
+    if (!thumb) { thumb = new MP.Scene(nodes.fyThumb); thumb.isThumb = true; }
     const dpr = Math.min(root.devicePixelRatio || 1, 2), w = nodes.fyThumb.clientWidth || 160, hh = nodes.fyThumb.clientHeight || 128;
     if (thumb.W !== w || thumb.H !== hh || thumb.dpr !== dpr) thumb.resize(w, hh, dpr);
     const r = S.route;
-    if (r) thumb.render({ ms: f.ms, lat: f.lat, lng: f.lng, heading: f.bearing, along: f.along, route: r, speed: 0, wx: MP.wxAt ? MP.wxAt(f.along, f.ms) : null, elevAt: MP.elevAt, signs: [], hy: hh * 0.42 }, 0);
+    if (r) thumb.render({ ms: f.ms, lat: f.lat, lng: f.lng, heading: f.bearing, along: f.along, route: r, speed: 0, wx: MP.wxAt ? MP.wxAt(f.along, f.ms) : null, elevAt: MP.elevAt, signs: [], hy: hh * 0.42, noWorld: S.prefs.scenery === false }, 0);
   };
 
   /* -------------------------------------------------------------- strip */

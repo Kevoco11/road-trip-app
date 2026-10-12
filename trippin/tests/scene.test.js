@@ -7,7 +7,7 @@ const path = require('path'), fs = require('fs');
 const { eq, near, MP } = require('./unit.js');
 const L = (f) => require(path.join(__dirname, '../js', f));
 const F = (f) => fs.readFileSync(path.join(__dirname, 'fixtures', f));
-L('mvt.js'); L('path.js'); const WORLD = L('world.js');
+L('mvt.js'); L('path.js'); const WORLD = L('world.js'); const TER = L('terrain.js');
 
 const tests = [];
 const t = (name, fn) => tests.push([name, fn]);
@@ -160,6 +160,95 @@ t('want() also prefetches the neighbour tile when a point is near a tile edge', 
   WORLD.want([{ lat: 42.58, lng }], true); await wait(60);
   ok(log.some((u) => u.endsWith('/14/4414/6046.pbf')), 'east neighbour requested: ' + log.join(','));
   WORLD.reset(); WORLD.fetchImpl = null;
+});
+
+
+group('mesh builder (terrain.js)');
+const sterling = () => MP.Route.fromOSRM(JSON.parse(F('osrm-sterling.json').toString()), ['Pemberton Dr', 'Van Dyke Ave']);
+const loadTile = async () => { WORLD.reset(); WORLD.fetchImpl = tileFetch(null); const r = sterling(); WORLD.want([r.pointAt(0)], true); await wait(80); WORLD.fetchImpl = null; return r; };
+const ctxFor = (route, extra) => Object.assign({ route, path: new MP.path.SmoothPath(route), frame: { kx: route.kx, ky: route.ky }, elevAt: null, month: 9 }, extra || {});
+t('PathIndex.nearest agrees with brute force', () => {
+  const r = legsRoute([[90, 300], [0, 200], [270, 250], [0, 150]]), sp = new MP.path.SmoothPath(r), w = sp.sample(0, r.total), idx = new TER.PathIndex(w);
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let n = 0; n < 200; n++) {
+    const px = w.x[0] + (rnd() - 0.2) * 700, py = w.y[0] + (rnd() - 0.3) * 600; let best = 1e18;
+    for (let i = 0; i + 1 < w.n; i++) { const ex = w.x[i + 1] - w.x[i], ey = w.y[i + 1] - w.y[i], l2 = ex * ex + ey * ey; let u = l2 > 0 ? ((px - w.x[i]) * ex + (py - w.y[i]) * ey) / l2 : 0; u = Math.max(0, Math.min(1, u)); best = Math.min(best, Math.hypot(w.x[i] + u * ex - px, w.y[i] + u * ey - py)); }
+    const h = idx.nearest(px, py, 900); ok(h, 'found'); near(h.d, best, 1e-6, 'distance');
+  }
+});
+t('side is + on the right of travel, − on the left', () => {
+  const r = legsRoute([[90, 400]]), sp = new MP.path.SmoothPath(r), w = sp.sample(0, r.total), idx = new TER.PathIndex(w);
+  const x = w.x[0] + 200, y = w.y[0];
+  ok(idx.nearest(x, y - 10, 50).side > 9.9, 'south of an eastbound road is its right'); ok(idx.nearest(x, y + 10, 50).side < -9.9, 'north is its left');
+});
+t('ear clipping preserves area for concave polygons and either winding', () => {
+  const L_ = [0, 0, 10, 0, 10, 4, 4, 4, 4, 10, 0, 10]; // L-shape, area 64
+  const area = (r, tris) => { let a = 0; for (let i = 0; i < tris.length; i += 3) { const A = tris[i], B = tris[i + 1], C = tris[i + 2]; a += Math.abs((r[2 * B] - r[2 * A]) * (r[2 * C + 1] - r[2 * A + 1]) - (r[2 * C] - r[2 * A]) * (r[2 * B + 1] - r[2 * A + 1])) / 2; } return a; };
+  const t1 = TER.triangulate(Float64Array.from(L_)); eq(t1.length / 3, 4); near(area(L_, t1), 64, 1e-9);
+  const rev = []; for (let i = L_.length - 2; i >= 0; i -= 2) rev.push(L_[i], L_[i + 1]); near(area(rev, TER.triangulate(Float64Array.from(rev))), 64, 1e-9);
+  eq(TER.triangulate(Float64Array.from([0, 0, 5, 0, 5, 5, 0, 5])).length / 3, 2);
+});
+t('cross-sections follow road class: markings, lanes, camera lane', () => {
+  const mw = TER.section('motorway', true, false), res = TER.section('residential', false, false), pri = TER.section('primary', false, false), ter = TER.section('tertiary', false, false);
+  ok(mw.lines.some((l) => l.dash) && mw.post, 'motorway has dashed lane lines and posts'); ok(mw.shR > 2, 'motorway has a wide right shoulder');
+  eq(res.lines.length, 0, 'residential streets are unmarked');
+  eq(pri.lines.filter((l) => l.c === TER.PAL.yellow && !l.dash).length, 2, 'primary: double yellow'); ok(pri.lines.some((l) => l.c === TER.PAL.white), 'white edge lines');
+  eq(ter.lines.filter((l) => l.dash && l.c === TER.PAL.yellow).length, 1, 'tertiary: dashed yellow');
+  ok(pri.cam > 0, 'two-way road: the car is right of the centre line'); near(TER.section('motorway', true, false).cam, 0, 0.01, 'three lanes → middle lane');
+});
+t('real chunks: finite, populated, deterministic', async () => {
+  const r = await loadTile(); const C = ctxFor(r, { debug: true });
+  let tris = 0, bld = 0, trees = 0;
+  const first = [];
+  for (let k = 0; k * TER.CH < r.total; k++) {
+    const c = TER.buildChunk(C, k); first.push(c);
+    for (const m of [c.base, c.detail]) for (let i = 0; i < m.pos.length; i++) ok(isFinite(m.pos[i]), 'finite vertex in chunk ' + k);
+    ok(c.stats.cells > 100, 'terrain in chunk ' + k); ok(c.stats.roads > 20, 'mapped streets in chunk ' + k); ok(c.stats.slices >= 40, 'ribbon slices');
+    tris += c.base.n / 3 + c.detail.n / 3; bld += c.stats.buildings; trees += c.stats.trees;
+  }
+  ok(bld > 400, 'real buildings drawn: ' + bld); ok(trees > 100, 'trees drawn where OSM maps a wood: ' + trees); ok(tris < 120000, 'triangle budget ' + tris);
+  eq(first[0].stats.trees, 0, 'no trees in a chunk without mapped woods (nothing invented)');
+  const again = TER.buildChunk(C, 2); eq(again.base.n, first[2].base.n); eq(again.detail.n, first[2].detail.n);
+  for (let i = 0; i < again.base.pos.length; i += 997) eq(again.base.pos[i], first[2].base.pos[i], 'deterministic geometry');
+});
+t('every terrain block belongs to exactly one chunk (no overlap, no gaps at seams)', async () => {
+  const r = await loadTile(); const C = ctxFor(r, { debug: true }), seen = new Map();
+  for (let k = 0; k * TER.CH < r.total; k++) for (const b of TER.buildChunk(C, k).stats.blocks) { ok(!seen.has(b), 'block ' + b + ' owned by chunks ' + seen.get(b) + ' and ' + k); seen.set(b, k); }
+  // the blocks along the road itself must all exist: walk the path and require the block under every 5th metre
+  const sp = C.path; let miss = 0;
+  for (let a = 0; a < r.total; a += 5) { const p = sp.pose(a); const key = Math.floor(p.x / 24) + ',' + Math.floor(p.y / 24); if (!seen.has(key)) miss++; }
+  eq(miss, 0, 'road cells covered');
+});
+t('ribbon seam: chunk k ends exactly where chunk k+1 starts', async () => {
+  const r = await loadTile(), C = ctxFor(r);
+  for (let k = 0; k < 4; k++) {
+    const c0 = TER.buildChunk(C, k), c1 = TER.buildChunk(C, k + 1), n0 = c0.slices.a.length - 1;
+    near(c0.slices.a[n0], (k + 1) * TER.CH, 1e-6); near(c1.slices.a[0], (k + 1) * TER.CH, 1e-6);
+    near(c0.slices.x[n0], c1.slices.x[0], 1e-6, 'x at seam'); near(c0.slices.y[n0], c1.slices.y[0], 1e-6, 'y at seam');
+  }
+});
+t('elevation: chunks built before it arrives are flagged stale; the road climbs with the profile', async () => {
+  const r = await loadTile(); const flat = TER.buildChunk(ctxFor(r), 1), hilly = TER.buildChunk(ctxFor(r, { elevAt: (a) => 200 + a * 0.02 }), 1);
+  ok(flat.sig.endsWith('|0') && hilly.sig.endsWith('|1'), flat.sig + ' vs ' + hilly.sig);
+  const zs = hilly.slices.z; near(zs[zs.length - 1] - zs[0], 0.02 * 500 * TER.EX, 0.3, 'a 2% grade over 500 m (×1.7 exaggeration) climbs 17 m');
+  near(flat.slices.z[flat.slices.z.length - 1], 0, 1e-9, 'no elevation data → flat');
+});
+t('no scenery data → ground and road only (nothing invented)', async () => {
+  const r = await loadTile(), c = TER.buildChunk(ctxFor(r, { noWorld: true }), 1);
+  eq(c.stats.buildings, 0); eq(c.stats.trees, 0); eq(c.stats.roads, 0); ok(c.stats.cells > 50, 'terrain'); ok(c.base.n > 300, 'ribbon');
+  const g = TER.buildChunk(ctxFor(r), 1); ok(g.stats.buildings > 50, 'same chunk with data has buildings');
+});
+t('road class falls back to the route steps until tiles arrive', async () => {
+  const r = sterling(); WORLD.reset();
+  const c = TER.buildChunk(ctxFor(r), 2);   // no tiles loaded
+  ok(c.slices.cls.length > 20 && c.slices.cls.every((x) => x), 'a class for every slice: ' + [...new Set(c.slices.cls)]);
+  ok(['primary', 'secondary'].includes(c.slices.cls[10]), 'M 53 · Van Dyke Avenue is not a residential street: ' + c.slices.cls[10]);
+});
+t('pools and tunnels are not scenery', async () => {
+  await loadTile();
+  const L = WORLD.localize(WORLD.tiles.get('4413/6046').data, FRAME);
+  ok(!L.covers.some((c) => c.cls === 'swimming_pool'), 'no backyard pools in the terrain grid');
+  ok(L.roads.length > 100 && L.roads.every((r) => r.cls !== 'rail'), 'roads are pavement only');
 });
 
 // ---------------------------------------------------------------- runner

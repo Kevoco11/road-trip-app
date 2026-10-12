@@ -56,15 +56,29 @@ for a **free drive** with no destination (the windshield shows a straight road a
   fixtures/emulators — never loaded by `index.html`. Anything unknown is shown as unknown ("unavailable", "—"), never guessed.
 - **Layout (`trippin/js/`):** `core.js` (geo/route/sun/units/storage), `engine.js` (state machine: GPS, ETA, stops, alertness,
   fuel), `plan.js` (trip plan model), `intel.js` (all network clients, see below), `voice.js` (TTS, speech recognition, command
-  parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield), `map.js` (canvas map),
+  parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield: 2D sky/weather + compositing), `path.js` (route → smooth road path), `world.js` + `mvt.js` (OSM vector tiles → buildings/woods/water/streets),
+  `terrain.js` (path + tiles → chunk meshes), `glscene.js` (WebGL2 renderer), `map.js` (canvas map),
   `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), screens: `drive.js` `ahead.js` `car.js` `pilot.js` `trip.js`,
   plus `hud.js` (dash-top display), `recap.js` (shareable poster), `diag.js` (error capture + "Share report"), `app.js` (boot).
 - **Public services (all keyless, all with fallbacks and status tracking in `MP.intel.status`):** routing OSRM
   (router.project-osrm.org → routing.openstreetmap.de), search Nominatim → Photon → Open-Meteo geocoder, weather + elevation
   Open-Meteo (OpenTopoData fallback), fuel/rest stops Overpass (several mirrors), stories Wikipedia, warnings US NWS,
-  tiles CARTO. The demo OSRM server sends no `toll` class, so toll roads are *inferred from road names* and labelled "likely".
+  map tiles Esri Canvas light/dark gray (keyless; CARTO's free tiles now return an "API KEY REQUIRED" image, so they are not used),
+  windshield scenery OpenFreeMap vector tiles (OpenStreetMap data). The demo OSRM server sends no `toll` class, so toll roads are *inferred from road names* and labelled "likely".
   Trip → Health check runs a live test of every service on the device.
-- **Tests (no dependencies):** `node trippin/tests/unit.js`, `node trippin/tests/obd.test.js`, `node trippin/tests/intel.test.js`
+- **Windshield (3D, real data only):** the Drive view is a WebGL2 scene composited under the 2D sky. `path.js` replaces every sharp junction corner of the
+  OSRM polyline with a tangent-continuous curve (the old renderer rotated a cross-section at the raw vertex, which folded into wedges at 90° turns) while
+  keeping `along` = the original route distance. `terrain.js` cuts the route into 500 m chunks and builds, per chunk, a terrain grid coloured by real land
+  cover, the road ribbon (class-appropriate lanes/markings), **every mapped street** from the tiles (so cross streets at junctions are the real streets),
+  extruded real building footprints (gabled roofs on small houses) and trees **only where OSM maps woods/parks/wetland** — nothing is invented, and with
+  no tile data a chunk is just ground + road. `glscene.js` draws chunks (one build, time-sliced, per frame), signs as textured 3D panels, and a quality
+  governor sheds detail below ~16 fps. Without WebGL2, with Settings → "3D scenery on the windshield" off, or in free drive / straight-line routes,
+  `Scene._roadFlat` (the old 2D road) is used. Tiles are fetched lazily around and ahead of the car and cached by the service worker (cache-first; the
+  TileJSON that names the data version is network-first). Trip → Health check probes both tile services; the diagnostic report includes WebGL/chunk stats.
+- **Visual test bench:** `trippin/tests/world-lab.html` renders a REAL OSRM route (`fixtures/osrm-sterling.json`) over a REAL tile (`fixtures/tile-14-4413-6046.pbf`,
+  Sterling Heights, MI). Drive it from Playwright (`await window.shot({along, h, m, wx, signs})`, then screenshot `#c`); use `--use-gl=angle --use-angle=swiftshader
+  --enable-unsafe-swiftshader` for headless WebGL.
+- **Tests (no dependencies):** `node trippin/tests/unit.js`, `node trippin/tests/obd.test.js`, `node trippin/tests/intel.test.js`, `node trippin/tests/scene.test.js`
   (parsers against real captured fixtures in `tests/fixtures/`, retry/fallback behaviour with a fake `fetch`, voice commands,
   alert rules, recap). `node trippin/tests/live.js "Toledo, OH" "Pittsburgh, PA"` exercises the REAL services end to end
   (set `NODE_USE_ENV_PROXY=1` behind a proxy). Browser checks: Playwright + Chromium can drive the app with a phone viewport;

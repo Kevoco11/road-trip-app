@@ -1,6 +1,8 @@
 /* WINDSHIELD — the road ahead, rendered from real data.
  *
- *   road shape      the route polyline: true perspective, so curves and junctions look like they will
+ *   road shape      the route polyline, with every junction corner turned into a real curve (path.js), drawn as a
+ *                   true 3D road (glscene.js + terrain.js); crossing streets are the actual mapped streets
+ *   surroundings    real OpenStreetMap buildings, woods/parks (trees), water and land cover around the road (world.js)
  *   hills           real elevation profile ahead (when known; otherwise the road is drawn flat)
  *   sun & moon      astronomically exact azimuth/altitude relative to your heading; moon phase is exact
  *   sky colour      from the sun's altitude (night → blue hour → sunset → day)
@@ -56,12 +58,23 @@
       const zen = mix(pal.zenith, grayCol, gray), mid = mix(pal.mid, grayCol, gray * 0.9), hor = mix(pal.horizon, grayCol, gray * 0.75);
       const FOV = 70, f = (W / 2) / Math.tan((FOV / 2) * D2R);
 
+      // ---- the 3D world is drawn first (offscreen) because its camera heading — which follows the road through
+      // a turn — is what the sky must be aligned to. It is composited onto this canvas after the sky.
+      let glr = null, hdg, light = null;
+      const fogD = util.clamp(1250 * (1 - fogAmt * 0.88) * (1 - gray * 0.3), 160, 1400);
+      if (route && !route.approx && MP.glworld && !this.noGL) {
+        light = this._light(sun, pal, gray, fogAmt, hor, fogD);
+        const jump = this._lastAlong == null || Math.abs((st.along || 0) - this._lastAlong) > 250 || this._lastRoute !== route;
+        this._lastAlong = st.along || 0; this._lastRoute = route;
+        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb, camH: this.camOverride ? this.camOverride.h : undefined, camBack: this.camOverride ? this.camOverride.b : undefined /* camOverride: test-bench hook */ }, dt);
+      }
+      hdg = glr ? glr.heading : (st.heading || 0);
+
       // ---- sky
       const g = ctx.createLinearGradient(0, 0, 0, hy);
       g.addColorStop(0, rgb(zen)); g.addColorStop(0.58, rgb(mid)); g.addColorStop(1, rgb(hor));
       ctx.fillStyle = g; ctx.fillRect(0, 0, W, hy + 2);
 
-      const hdg = st.heading || 0;
       const toX = (az) => W / 2 + (util.angDiff(hdg, az) / FOV) * W;
       const VF = 46, toY = (alt) => hy - (alt / VF) * hy;
       const sx = toX(sun.azimuth), sy = toY(sun.altitude);
@@ -142,8 +155,16 @@
       }
 
       // ---- ground
-      ctx.fillStyle = rgb(hor); ctx.fillRect(0, hy, W, H - hy);
-      this._road(ctx, st, route, W, H, hy, f, pal, hor, gray, wet, fogAmt, sun);
+      if (glr) {
+        this._groundBase(ctx, W, H, hy, f, hor, light);
+        ctx.drawImage(glr.canvas, 0, 0, W, H);
+        const hz = ctx.createLinearGradient(0, hy - 16, 0, hy + 46);   // haze where land meets sky
+        hz.addColorStop(0, rgb(hor, 0)); hz.addColorStop(0.35, rgb(hor, 0.55)); hz.addColorStop(1, rgb(hor, 0));
+        ctx.fillStyle = hz; ctx.fillRect(0, hy - 16, W, 62);
+      } else {
+        ctx.fillStyle = rgb(hor); ctx.fillRect(0, hy, W, H - hy);
+        this._roadFlat(ctx, st, route, W, H, hy, f, pal, hor, gray, wet, fogAmt, sun);
+      }
 
       // ---- atmosphere over everything
       // sun glare bloom (only when the sun is low and in front of us)
@@ -192,9 +213,38 @@
       this.last = { sun, mp, pal };
     }
 
-    /* -------------------------------------------------------------- road */
-    _road(ctx, st, route, W, H, hy, f, pal, hor, gray, wet, fogAmt, sun) {
-      const camH = 5.4, camBack = 11, EX = 1.7; // EX: gentle vertical exaggeration so hills read at this camera height
+    /* ------------------------------------------------------ lighting for the 3D world */
+    /** sun/ambient/fog/headlight uniforms, in the same palette the 2D sky uses so land and sky always agree */
+    _light(sun, pal, gray, fogAmt, hor, fogD) {
+      const alt = sun.altitude, sinA = Math.sin(alt * D2R), L = util.clamp(pal.light, 0, 1);
+      const sunStr = util.clamp((alt + 1.5) / 6, 0, 1) * util.clamp(sinA * 1.15 + 0.1, 0, 1) * (1 - gray * 0.85);
+      const low = util.clamp(1 - alt / 28, 0, 1), w = low * low;
+      const sc = [1 + (1 - 1) * w, 0.97 - 0.39 * w, 0.92 - 0.62 * w].map((v) => v * 0.98 * sunStr);
+      const dayA = [0.5, 0.55, 0.62], dusk = [0.2, 0.23, 0.34], nightA = [0.035, 0.045, 0.078];
+      const k = util.clamp((L - 0.18) / 0.5, 0, 1), k2 = util.clamp(L / 0.18, 0, 1);
+      const amb = [0, 1, 2].map((i) => (nightA[i] + (dusk[i] - nightA[i]) * k2 + (dayA[i] - dusk[i]) * k) * (1 + gray * 0.22));
+      const az = sun.azimuth * D2R, ca = Math.cos(alt * D2R);
+      return {
+        sunWorld: [Math.sin(az) * ca, Math.cos(az) * ca, sinA], sunCol: sc, amb, fogCol: hor.map((v) => v / 255), headCol: [1, 0.93, 0.78], fogD, head: (1 - L) * 0.75,
+        alb: [106 / 255, 144 / 255, 76 / 255],
+      };
+    }
+    /** below the horizon: a flat-ground gradient lit exactly like the terrain shader, so nothing shows a seam at the edge of the mesh */
+    _groundBase(ctx, W, H, hy, f, hor, l) {
+      if (!l) { ctx.fillStyle = rgb(hor); ctx.fillRect(0, hy, W, H - hy); return; }
+      const camH = 3.2, g = ctx.createLinearGradient(0, hy, 0, H);   // = GLWorld's default camera height
+      for (const z of [6000, 2500, 1200, 600, 300, 150, 75, 38, 18, 9]) {
+        const y = hy + (camH * f) / z, t = (y - hy) / (H - hy); if (t >= 1) continue;
+        const dist = Math.hypot(z, camH), ndv = camH / dist, hl = l.head * Math.exp(-dist / 42) * (0.3 + 0.7 * ndv), fog = 1 - Math.exp(-dist / l.fogD);
+        const c = [0, 1, 2].map((i) => { const lit = l.alb[i] * (l.amb[i] + l.sunCol[i] * l.sunWorld[2] + l.headCol[i] * hl); return (lit + (l.fogCol[i] - lit) * fog) * 255; });
+        g.addColorStop(Math.max(0, Math.min(1, t)), 'rgb(' + c.map((v) => Math.round(util.clamp(v, 0, 255))).join(',') + ')');
+      }
+      ctx.fillStyle = g; ctx.fillRect(0, hy, W, H - hy);
+    }
+
+    /* -------------------------------------------------------------- road (flat 2D fallback) */
+    _roadFlat(ctx, st, route, W, H, hy, f, pal, hor, gray, wet, fogAmt, sun) {
+      const camH = 5.4, camBack = 11, EX = 1.7; // (flat 2D fallback keeps its original chase-cam) EX: gentle vertical exaggeration so hills read at this camera height
       const L = pal.light;
       const along = (st.along || 0) - camBack;
       const fogD = util.clamp(1250 * (1 - fogAmt * 0.88) * (1 - gray * 0.3), 160, 1400);

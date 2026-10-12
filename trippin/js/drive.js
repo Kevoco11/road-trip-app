@@ -223,7 +223,7 @@
     else if (S.trip) { ms = d.now || Date.now(); along = d.along || 0; speed = d.speedMps || 0; }
     else { ms = E.plannedDepartMs(); along = 0; }
     const pt = r.pointAt(along);
-    return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy };
+    return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy, noWorld: S.prefs.scenery === false };
   }
   D.drawScene = function (dt) { const st = sceneState(); scene.render(st, dt); D._sceneState = st; };
 

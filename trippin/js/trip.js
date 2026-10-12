@@ -305,7 +305,8 @@
       h('div.fields', num('You woke up at (hour, 24 h)', 'wakeHour', '0.25', 'The alertness model uses hours awake: night drives after a long day are risky'), num('Typical stop (min)', 'avgStopMin', '1'))));
     el.append(h('section.card', h('div.card-h', h('h3', icon('gear'), 'Display')),
       h('div.fields', h('div.field', h('span.k', 'Units'), seg('units', [['imperial', 'Miles'], ['metric', 'Km']], () => { T.renderPlan(); })), h('div.field', h('span.k', 'Theme'), seg('theme', [['auto', 'Follow sun'], ['atlas', 'Day'], ['night', 'Night']])),
-        h('div.field', h('span.k', 'Keep screen on while driving'), seg('keepAwake', [[true, 'On'], [false, 'Off']])))));
+        h('div.field', h('span.k', 'Keep screen on while driving'), seg('keepAwake', [[true, 'On'], [false, 'Off']])),
+        h('div.field', h('span.k', '3D scenery on the windshield'), seg('scenery', [[true, 'On'], [false, 'Off']], () => { if (MP.drive && MP.drive.layout) MP.drive.layout(); }), h('small', 'Real buildings, woods and streets from OpenStreetMap. Turn off if your phone struggles; the road itself stays 3D.')))));
     el.append(nodes.health);
     MP.bus.on('route', () => { if (!el.hidden) T.renderPlan(); });
     MP.bus.on('intel', util.throttle(() => { if (!el.hidden && S.plan && !editing) T.renderPlan(); }, 1500));

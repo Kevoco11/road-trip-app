@@ -561,6 +561,8 @@
       t('Place search', async () => { const r = await I.geocode('Toledo, Ohio'); if (!r.length) throw new Error('no results'); }),
       t('Weather & elevation', async () => { const j = await getJSON(CFG.meteo + '/v1/elevation?latitude=42.6&longitude=-83.0', { svc: 'elevation', tries: 1, timeout: 12000 }); if (!j.elevation) throw new Error('bad reply'); }),
       t('Fuel & rest stops', async () => { await getJSON(CFG.overpass[0], { svc: 'places', method: 'POST', body: 'data=' + encodeURIComponent('[out:json][timeout:10];node(1);out;'), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, tries: 1, timeout: 15000 }).catch(() => getJSON(CFG.overpass[3], { svc: 'places', method: 'POST', body: 'data=' + encodeURIComponent('[out:json][timeout:10];node(1);out;'), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, tries: 1, timeout: 15000 })); }),
+      t('Map tiles (Esri)', async () => { const r = await F()('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/6/23/17'); if (!r.ok) throw new Error('HTTP ' + r.status); }),
+      t('Windshield scenery (OSM tiles)', async () => { if (!MP.world) throw new Error('not loaded'); await MP.world.selfTest(); }),
       t('Roadside stories', async () => { await getJSON(CFG.wikipedia + '?action=query&format=json&origin=*&meta=siteinfo', { svc: 'stories', tries: 1, timeout: 12000 }); }),
       t('Weather alerts (US)', async () => { await getJSON(CFG.nws + '?point=42.6,-83.0', { svc: 'alerts', tries: 1, timeout: 12000 }); }),
     ]);

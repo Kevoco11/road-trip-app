@@ -21,7 +21,7 @@
   const DEFAULT_PREFS = {
     units: 'imperial', theme: 'auto', voice: true, voiceRate: 1.0, haptics: true,
     tankGal: 14, mpg: 28, reserveGal: 1.0, fuelType: 'gasoline', dispL: null, fuelPrice: 3.45,
-    avgStopMin: 12, wakeHour: 6.0, hudMode: 'reflectV', lens: 'plain', keepAwake: true,
+    avgStopMin: 12, wakeHour: 6.0, hudMode: 'reflectV', lens: 'plain', keepAwake: true, scenery: true,
     alerts: { break: true, fuel: true, weather: true, glare: true, toll: true, engine: true, speed: false, stories: false },
     geminiKey: '', geminiModel: 'gemini-2.5-flash', vehicleName: '',
   };
