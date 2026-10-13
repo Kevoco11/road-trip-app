@@ -45,7 +45,8 @@ vanilla JS. There is no backend, build step, package manager, or dependencies.
 A from-scratch rebuild of the road-trip cockpit that lives beside the original (`index.html` is untouched).
 Static files only, no build step, no runtime dependencies. Serve the repo root and open `/trippin/index.html`.
 There is **no built-in trip**: you plan any trip in the Trip tab (place search → real OSRM routes), or press START on Drive
-for a **free drive** with no destination (the windshield shows a straight road along your GPS heading).
+for a **free drive** with no destination (the windshield follows the real mapped street you are on — see `freeroad.js`;
+only when the map does not know the street does it fall back to a straight flat road along your GPS heading).
 
 - **Idea:** the UI speaks the road's own visual language. Drive is a live *windshield* (road curvature/hills from the route,
   sun and moon at their true positions, weather, exit gantries), a dark dashboard cluster, a dot-matrix message board, a
@@ -57,7 +58,7 @@ for a **free drive** with no destination (the windshield shows a straight road a
 - **Layout (`trippin/js/`):** `core.js` (geo/route/sun/units/storage), `engine.js` (state machine: GPS, ETA, stops, alertness,
   fuel), `plan.js` (trip plan model), `intel.js` (all network clients, see below), `voice.js` (TTS, speech recognition, command
   parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield: 2D sky/weather + compositing), `path.js` (route → smooth road path), `world.js` + `mvt.js` (OSM vector tiles → buildings/woods/water/streets),
-  `terrain.js` (path + tiles → chunk meshes), `glscene.js` (WebGL2 renderer), `map.js` (canvas map),
+  `terrain.js` (path + tiles → chunk meshes), `freeroad.js` (free drive: the real street ahead from the tiles), `glscene.js` (WebGL2 renderer), `map.js` (canvas map),
   `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), screens: `drive.js` `ahead.js` `car.js` `pilot.js` `trip.js`,
   plus `hud.js` (dash-top display), `recap.js` (shareable poster), `diag.js` (error capture + "Share report"), `app.js` (boot).
 - **Public services (all keyless, all with fallbacks and status tracking in `MP.intel.status`):** routing OSRM
@@ -72,8 +73,11 @@ for a **free drive** with no destination (the windshield shows a straight road a
   cover, the road ribbon (class-appropriate lanes/markings), **every mapped street** from the tiles (so cross streets at junctions are the real streets),
   extruded real building footprints (gabled roofs on small houses) and trees **only where OSM maps woods/parks/wetland** — nothing is invented, and with
   no tile data a chunk is just ground + road. `glscene.js` draws chunks (one build, time-sliced, per frame), signs as textured 3D panels, and a quality
-  governor sheds detail below ~16 fps. Without WebGL2, with Settings → "3D scenery on the windshield" off, or in free drive / straight-line routes,
-  `Scene._roadFlat` (the old 2D road) is used. Tiles are fetched lazily around and ahead of the car and cached by the service worker (cache-first; the
+  governor sheds detail below ~16 fps and restores it after a long smooth stretch. It only counts frames drawn at full rate (`live`): the Drive tab
+  redraws every 120 ms while no trip is running, and timing that pause once made every phone look slow and switched buildings/trees off for good.
+  **Free drive** has no route, so `freeroad.js` builds one from the tiles: the mapped street under the car that runs along the GPS heading, followed
+  straight ahead through junctions until it ends; it is rebuilt when the car turns off it. Without WebGL2, for straight-line routes, or in a free
+  drive where no street is known yet (no GPS heading, no tiles, off the map, or scenery switched off), `Scene._roadFlat` (the old 2D road) is used. Tiles are fetched lazily around and ahead of the car and cached by the service worker (cache-first; the
   TileJSON that names the data version is network-first). Trip → Health check probes both tile services; the diagnostic report includes WebGL/chunk stats.
 - **Visual test bench:** `trippin/tests/world-lab.html` renders a REAL OSRM route (`fixtures/osrm-sterling.json`) over a REAL tile (`fixtures/tile-14-4413-6046.pbf`,
   Sterling Heights, MI). Drive it from Playwright (`await window.shot({along, h, m, wx, signs})`, then screenshot `#c`); use `--use-gl=angle --use-angle=swiftshader

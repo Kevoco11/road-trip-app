@@ -251,6 +251,36 @@ t('pools and tunnels are not scenery', async () => {
   ok(L.roads.length > 100 && L.roads.every((r) => r.cls !== 'rail'), 'roads are pavement only');
 });
 
+group('free drive: the real road ahead');
+t('follows the mapped street under the car, in the direction of travel', async () => {
+  const r = await loadTile(), FRD = L('freeroad.js'), p = r.pointAt(900);
+  const b = FRD.build(p.lat, p.lng, p.bearing);
+  ok(b && b.route, 'a path is found on a mapped street: ' + FRD.status);
+  eq(b.route.source, 'map'); ok(!b.route.approx, 'real geometry, so the 3D windshield draws it');
+  const sn = b.route.snap(p.lat, p.lng);
+  ok(sn.off < 12, 'the path passes under the car: ' + sn.off.toFixed(1) + ' m');
+  ok(b.route.total - sn.along > 150, 'road ahead: ' + Math.round(b.route.total - sn.along) + ' m');
+  ok(Math.abs(MP.util.angDiff(b.route.pointAt(sn.along + 5).bearing, p.bearing)) < 30, 'heads the way the car is heading');
+  const rev = FRD.build(p.lat, p.lng, (p.bearing + 180) % 360);
+  ok(rev && Math.abs(MP.util.angDiff(rev.route.pointAt(rev.route.snap(p.lat, p.lng).along + 5).bearing, (p.bearing + 180) % 360)) < 30, 'the other way when driving the other way');
+  for (let i = 0; i < b.route.n; i++) ok(isFinite(b.route.pts[2 * i]) && isFinite(b.route.pts[2 * i + 1]), 'finite');
+});
+t('unknown stays unknown: no heading, no tiles or no street → no path', async () => {
+  const r = await loadTile(), FRD = L('freeroad.js'), p = r.pointAt(900);
+  eq(FRD.build(p.lat, p.lng, null), null); eq(FRD.status, 'no heading');
+  eq(FRD.build(p.lat, p.lng, (p.bearing + 90) % 360) && 'found', FRD.status === 'ok' ? 'found' : null);   // crossing the street: only if a real street runs that way here
+  WORLD.reset(); eq(FRD.build(p.lat, p.lng, p.bearing), null); eq(FRD.status, 'no map data');
+});
+t('update() keeps one path while the car stays on it', async () => {
+  const r = await loadTile(), FRD = L('freeroad.js'); FRD.reset(); const want = WORLD.want; WORLD.want = () => {};
+  try {
+    const p = r.pointAt(900), g = { lat: p.lat, lng: p.lng, heading: p.bearing, speed: 12 };
+    const a = FRD.update(g, {}, 1e6); ok(a && a.route, 'path on first fix: ' + FRD.status);
+    const q = a.route.pointAt(a.along + 40), b = FRD.update({ lat: q.lat, lng: q.lng, heading: q.bearing, speed: 12 }, {}, 1e6 + 3000);
+    ok(b && b.route === a.route, 'same path 40 m later'); ok(b.along > a.along + 30, 'progress along it');
+  } finally { WORLD.want = want; }
+});
+
 // ---------------------------------------------------------------- runner
 (async () => {
   let pass = 0, fail = 0;

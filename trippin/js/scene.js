@@ -66,7 +66,7 @@
         light = this._light(sun, pal, gray, fogAmt, hor, fogD);
         const jump = this._lastAlong == null || Math.abs((st.along || 0) - this._lastAlong) > 250 || this._lastRoute !== route;
         this._lastAlong = st.along || 0; this._lastRoute = route;
-        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb, camH: this.camOverride ? this.camOverride.h : undefined, camBack: this.camOverride ? this.camOverride.b : undefined /* camOverride: test-bench hook */ }, dt);
+        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb && st.live !== false, camH: this.camOverride ? this.camOverride.h : undefined, camBack: this.camOverride ? this.camOverride.b : undefined /* camOverride: test-bench hook */ }, dt);
       }
       hdg = glr ? glr.heading : (st.heading || 0);
 

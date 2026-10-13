@@ -212,18 +212,26 @@
   };
 
   /* ---------------------------------------------------------- the scene */
+  /** metres travelled since the last GPS fix (fixes arrive about once a second; without this the road advances in jerks) */
+  function coast(room) {
+    const g = S.gps, v = S.d.speedMps || 0, age = (Date.now() - (g.ts || 0)) / 1000;
+    return S.d.stale || v < 1 || age <= 0 ? 0 : Math.max(0, Math.min(room, v * Math.min(age, 1.5)));
+  }
   function sceneState() {
     const r = S.route, d = S.d, hy = D.vis ? D.vis.hy : 220;
     if (!r) {   // free drive: no road geometry is known, so the windshield shows a straight road along your GPS heading
       const pos = S.gps.lat != null ? S.gps : MP.store.get('lastpos', null) || { lat: 39.8, lng: -98.6 };
+      // …unless the map knows the street you are on: then the real road ahead is drawn, with its real surroundings (freeroad.js)
+      const fr = S.trip && S.prefs.scenery !== false && MP.freeroad ? MP.freeroad.update(S.gps, d) : null;
+      if (fr) return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: fr.along + coast(fr.route.total - fr.along), route: fr.route, speed: d.speedMps || 0, wx: null, elevAt: null, signs: [], hy, live: true };
       return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: 0, route: null, speed: d.speedMps || 0, wx: null, elevAt: null, signs: [], hy };
     }
     let ms, along, speed = 0;
     if (preview != null && F) { const f = F.at(preview); ms = f.ms; along = f.along; speed = f.moving ? 28 : 0; }
-    else if (S.trip) { ms = d.now || Date.now(); along = d.along || 0; speed = d.speedMps || 0; }
+    else if (S.trip) { ms = d.now || Date.now(); along = (d.along || 0) + coast(r.total - (d.along || 0)); speed = d.speedMps || 0; }
     else { ms = E.plannedDepartMs(); along = 0; }
     const pt = r.pointAt(along);
-    return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy, noWorld: S.prefs.scenery === false };
+    return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy, noWorld: S.prefs.scenery === false, live: !!S.trip || preview != null };
   }
   D.drawScene = function (dt) { const st = sceneState(); scene.render(st, dt); D._sceneState = st; };
 

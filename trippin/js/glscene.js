@@ -168,11 +168,18 @@ void main(){
       if (!this.init(cam.dpr) || this.contextLost) return null;
       const gl = this.gl, route = cam.route, s = this.state(route), CH = T().CH, EX = T().EX;
       const W = Math.round(cam.W * cam.dpr), H = Math.round(cam.H * cam.dpr); this.resize(W, H);
-      // quality governor: if the live windshield averages under ~16 fps for a few seconds, shed detail (never flaps back up)
+      // quality governor: if the live windshield averages under ~16 fps for a few seconds, shed detail; a long smooth
+      // stretch earns it back. Only frames drawn at full rate count — the Drive tab deliberately redraws slowly while no
+      // trip is running, and timing that pause made every phone look slow (and switched buildings/trees off for good).
       if (cam.live) {
         const now = (root.performance || Date).now(), gap = this._lastT ? now - this._lastT : 0; this._lastT = now;
-        if (gap > 0 && gap < 400) { this.ema = this.ema ? this.ema * 0.93 + gap * 0.07 : gap; if (this.ema > 64 && this.quality > 0 && ++this.slow > 60) { this.quality--; this.slow = 0; this.ema = 40; if (MP.diag && MP.diag.push) MP.diag.push('gl', 'slow frames: quality lowered to ' + this.quality); } else if (this.ema <= 64) this.slow = 0; }
-      }
+        if (gap > 0 && gap < 400) {
+          this.ema = this.ema ? this.ema * 0.93 + gap * 0.07 : gap;
+          if (this.ema > 64 && this.quality > 0 && ++this.slow > 60) { this.quality--; this.slow = 0; this.fast = 0; this.ema = 40; if (MP.diag && MP.diag.push) MP.diag.push('gl', 'slow frames: quality lowered to ' + this.quality); }
+          else if (this.ema <= 64) this.slow = 0;
+          if (this.ema < 40 && this.quality < 2) { if (++this.fast > 450) { this.quality++; this.fast = 0; } } else this.fast = 0;
+        }
+      } else this._lastT = 0;
       const elevRaw = (a) => { const e = cam.elevAt ? cam.elevAt(Math.max(0, Math.min(route.total, a))) : null; return e == null ? 0 : e; };
 
       // camera: a chase cam 11 m behind the car, in its lane, 5.4 m up
