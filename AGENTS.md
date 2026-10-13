@@ -57,7 +57,8 @@ only when the map does not know the street does it fall back to a straight flat 
   fixtures/emulators — never loaded by `index.html`. Anything unknown is shown as unknown ("unavailable", "—"), never guessed.
 - **Layout (`trippin/js/`):** `core.js` (geo/route/sun/units/storage), `engine.js` (state machine: GPS, ETA, stops, alertness,
   fuel), `plan.js` (trip plan model), `intel.js` (all network clients, see below), `voice.js` (TTS, speech recognition, command
-  parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield: 2D sky/weather + compositing), `path.js` (route → smooth road path), `world.js` + `mvt.js` (OSM vector tiles → buildings/woods/water/streets),
+  parser, optional Gemini), `future.js`+`pit.js` (projection + Pit Window), `scene.js` (windshield: 2D sky/weather + compositing), `path.js` (route → smooth road path), `world.js` + `mvt.js` (OSM vector tiles → buildings/woods/water/streets/street names),
+  `street.js` (OSM nodes via Overpass → traffic signals, stop/yield signs, street lamps, marked crosswalks),
   `terrain.js` (path + tiles → chunk meshes), `freeroad.js` (free drive: the real street ahead from the tiles), `glscene.js` (WebGL2 renderer), `map.js` (canvas map),
   `obd.js`+`dtc.js` (OBD), `logger.js` (Black Box + Pace Lab), screens: `drive.js` `ahead.js` `car.js` `pilot.js` `trip.js`,
   plus `hud.js` (dash-top display), `recap.js` (shareable poster), `diag.js` (error capture + "Share report"), `app.js` (boot).
@@ -65,7 +66,8 @@ only when the map does not know the street does it fall back to a straight flat 
   (router.project-osrm.org → routing.openstreetmap.de), search Nominatim → Photon → Open-Meteo geocoder, weather + elevation
   Open-Meteo (OpenTopoData fallback), fuel/rest stops Overpass (several mirrors), stories Wikipedia, warnings US NWS,
   map tiles Esri Canvas light/dark gray (keyless; CARTO's free tiles now return an "API KEY REQUIRED" image, so they are not used),
-  windshield scenery OpenFreeMap vector tiles (OpenStreetMap data). The demo OSRM server sends no `toll` class, so toll roads are *inferred from road names* and labelled "likely".
+  windshield scenery OpenFreeMap vector tiles (OpenStreetMap data); signals/signs/lamps/crosswalks from Overpass, one request per zoom-13 cell, cached 30 days in IndexedDB
+  (the OpenMapTiles tile schema has no traffic signals or street lamps — checked against the real tile fixture). The demo OSRM server sends no `toll` class, so toll roads are *inferred from road names* and labelled "likely".
   Trip → Health check runs a live test of every service on the device.
 - **Windshield (3D, real data only):** the Drive view is a WebGL2 scene composited under the 2D sky. `path.js` replaces every sharp junction corner of the
   OSRM polyline with a tangent-continuous curve (the old renderer rotated a cross-section at the raw vertex, which folded into wedges at 90° turns) while
@@ -79,8 +81,13 @@ only when the map does not know the street does it fall back to a straight flat 
   straight ahead through junctions until it ends; it is rebuilt when the car turns off it. Without WebGL2, for straight-line routes, or in a free
   drive where no street is known yet (no GPS heading, no tiles, off the map, or scenery switched off), `Scene._roadFlat` (the old 2D road) is used. Tiles are fetched lazily around and ahead of the car and cached by the service worker (cache-first; the
   TileJSON that names the data version is network-first). Trip → Health check probes both tile services; the diagnostic report includes WebGL/chunk stats.
+- **Junctions and street furniture (real data only):** `terrain.js` finds every place a mapped street (not a driveway/parking aisle) meets the route and, there, opens the
+  edge line and shoulder on that side, breaks the centre line, and names the junction from the tiles' `transportation_name` layer; `glscene.js` shows the next few
+  cross-street names as street-name blades. `street.js` nodes are drawn only where OpenStreetMap maps them: signal mast arms with a head over each lane (plus heads facing
+  oncoming and side-street traffic) and a stop line; stop/yield signs facing the traffic they control; lamps (lit by the shader after dusk); ladder crosswalks.
+  **A signal's state (red/yellow/green) is not public data, so heads are always drawn dark — never guessed.** No street data loaded → none of this is drawn.
 - **Visual test bench:** `trippin/tests/world-lab.html` renders a REAL OSRM route (`fixtures/osrm-sterling.json`) over a REAL tile (`fixtures/tile-14-4413-6046.pbf`,
-  Sterling Heights, MI). Drive it from Playwright (`await window.shot({along, h, m, wx, signs})`, then screenshot `#c`); use `--use-gl=angle --use-angle=swiftshader
+  Sterling Heights, MI) with the REAL Overpass reply for that tile (`fixtures/overpass-street-14-4413-6046.json`). Drive it from Playwright (`await window.shot({along, h, m, wx, signs})`, then screenshot `#c`); use `--use-gl=angle --use-angle=swiftshader
   --enable-unsafe-swiftshader` for headless WebGL.
 - **Tests (no dependencies):** `node trippin/tests/unit.js`, `node trippin/tests/obd.test.js`, `node trippin/tests/intel.test.js`, `node trippin/tests/scene.test.js`
   (parsers against real captured fixtures in `tests/fixtures/`, retry/fallback behaviour with a fake `fetch`, voice commands,

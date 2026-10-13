@@ -354,14 +354,14 @@
   };
 
   const hostBad = {};   // overpass host -> time of its last failure (tried last for a few minutes afterwards)
-  async function overpass(body) {
+  async function overpass(body, svc, timeout) {
     const now = Date.now();
     const hosts = CFG.overpass.slice().sort((a, b) => ((now - (hostBad[a] || 0) < 180000 ? 1 : 0) - (now - (hostBad[b] || 0) < 180000 ? 1 : 0)));
     let lastErr = null;
     for (let round = 0; round < 2; round++) {
       for (const host of hosts) {
         try {
-          const j = await getJSON(host, { svc: 'places', method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 35000, tries: 1 });
+          const j = await getJSON(host, { svc: svc || 'places', method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: timeout || 35000, tries: 1 });
           if (j.remark && /runtime error|timed out/i.test(j.remark) && !(j.elements && j.elements.length)) throw new Error('Overpass: ' + j.remark);
           delete hostBad[host];
           return j.elements || [];
@@ -371,6 +371,7 @@
     }
     throw lastErr || new Error('places unavailable');
   }
+  I.overpass = overpass;
 
   async function fetchPois(route) {
     const step = 90000, chunks = [];
@@ -563,6 +564,7 @@
       t('Fuel & rest stops', async () => { await getJSON(CFG.overpass[0], { svc: 'places', method: 'POST', body: 'data=' + encodeURIComponent('[out:json][timeout:10];node(1);out;'), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, tries: 1, timeout: 15000 }).catch(() => getJSON(CFG.overpass[3], { svc: 'places', method: 'POST', body: 'data=' + encodeURIComponent('[out:json][timeout:10];node(1);out;'), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, tries: 1, timeout: 15000 })); }),
       t('Map tiles (Esri)', async () => { const r = await F()('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/6/23/17'); if (!r.ok) throw new Error('HTTP ' + r.status); }),
       t('Windshield scenery (OSM tiles)', async () => { if (!MP.world) throw new Error('not loaded'); await MP.world.selfTest(); }),
+      t('Signals, signs & street lamps (OSM)', async () => { const els = await overpass('data=' + encodeURIComponent('[out:json][timeout:10];node["highway"="traffic_signals"](42.5800,-83.0310,42.5815,-83.0290);out 1;'), 'signals'); if (!Array.isArray(els)) throw new Error('bad reply'); }),
       t('Roadside stories', async () => { await getJSON(CFG.wikipedia + '?action=query&format=json&origin=*&meta=siteinfo', { svc: 'stories', tries: 1, timeout: 12000 }); }),
       t('Weather alerts (US)', async () => { await getJSON(CFG.nws + '?point=42.6,-83.0', { svc: 'alerts', tries: 1, timeout: 12000 }); }),
     ]);

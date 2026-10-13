@@ -114,6 +114,7 @@
 
   /* ------------------------------------------------------------------ road cross-sections */
   const HWY = { motorway: 1, trunk: 1 };
+  const MINOR = { service: 1, track: 1 }, RANK = { motorway: 6, trunk: 5, primary: 4, secondary: 3, tertiary: 2, minor: 1, residential: 1 }, TAU = Math.PI * 2;
   /** pavement description for a road class. All offsets are metres from the centre-line, + = right of travel. */
   function section(cls, oneway, ramp) {
     const w = (W().ROADW && W().ROADW[cls]) || 7, hw = w / 2, hwy = !!HWY[cls];
@@ -133,7 +134,7 @@
     }
     // camera rides the right lane of a two-lane road, the right lane of a 2-lane carriageway, the middle of 3+ lanes
     const cam = !multi ? hw / 2 : lanes >= 3 ? -hw + (w * (Math.floor(lanes / 2) + 0.5)) / lanes : lanes === 2 ? hw / 2 : 0;
-    return { cls, hw, w, shL: sh[0], shR: sh[1], lines, cam, post: hwy };
+    return { cls, hw, w, shL: sh[0], shR: sh[1], lines, cam, post: hwy, multi: !!multi, lanes };
   }
   T.section = section;
 
@@ -254,7 +255,8 @@
     stats.tiles = q.have.length;
     lap('query');
     const raster = world.rasterize(q, bb, RES); lap('raster');
-    const sig = q.have.join(',') + '|' + (hasElev ? 1 : 0);
+    const furn = C.noWorld || !MP.street ? null : MP.street.query(C.frame, bb);
+    const sig = q.have.join(',') + '|' + (furn ? furn.have.join(',') : '') + '|' + (hasElev ? 1 : 0);
 
     /* ---- road class / cross-section for every slice */
     const secBy = new Map(), sec = (cls, ow, ramp) => { const key = cls + (ow ? 'o' : '') + (ramp ? 'r' : ''); let s = secBy.get(key); if (!s) secBy.set(key, (s = section(cls, ow, ramp))); return s; };
@@ -272,6 +274,76 @@
     yield; sliceT = Date.now(); tl = sliceT;
     /* ---- mark the route's own corridor as blocked so nothing grows or is built on the road */
     for (let i = 0; i + 1 < slices.length; i++) { const hw = secs[i].hw + secs[i].shR + 2.5; raster.stroke(raster.block, Float64Array.from([slices[i].x, slices[i].y, slices[i + 1].x, slices[i + 1].y]), hw * 2, 1); }
+
+    /* ---- junctions: every place a mapped street meets or crosses the route (driveways and parking aisles are not junctions) */
+    const junctions = [];
+    const secAt = (a) => { let lo = 0, hi = aArr.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (aArr[m] <= a) lo = m; else hi = m; } return secs[a >= aArr[hi] ? hi : lo]; };
+    const segNear = (list, x, y, maxD, dx, dy) => {   // nearest segment of any polyline in list (optionally only ones running along (dx,dy))
+      let best = null, bd = maxD;
+      for (const r of list) {
+        if (x < r.bb[0] - maxD || x > r.bb[2] + maxD || y < r.bb[1] - maxD || y > r.bb[3] + maxD) continue;
+        const p = r.pts;
+        for (let i = 0; i + 3 < p.length; i += 2) {
+          const ax = p[i], ay = p[i + 1], ex = p[i + 2] - ax, ey = p[i + 3] - ay, l2 = ex * ex + ey * ey; if (l2 < 1e-6) continue;
+          let t = ((x - ax) * ex + (y - ay) * ey) / l2; t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const d = Math.hypot(ax + t * ex - x, ay + t * ey - y); if (d >= bd) continue;
+          const l = Math.sqrt(l2); if (dx !== undefined && Math.abs((ex * dx + ey * dy) / l) < 0.8) continue;
+          bd = d; best = { r, d, ux: ex / l, uy: ey / l, qx: ax + t * ex, qy: ay + t * ey };
+        }
+      }
+      return best;
+    };
+    if (q.roads.length) {
+      const raw = [], near = (x, y) => (x < sx0 - 90 || x > sx1 + 90 || y < sy0 - 90 || y > sy1 + 90 ? null : idx.nearest(x, y, 70));
+      for (const r of q.roads) {
+        if (MINOR[r.cls] || r.bridge || r.bb[2] < sx0 - 90 || r.bb[0] > sx1 + 90 || r.bb[3] < sy0 - 90 || r.bb[1] > sy1 + 90) continue;
+        const p = r.pts, n = p.length >> 1; let hb = near(p[0], p[1]);
+        for (let i = 0; i + 1 < n; i++) {
+          const ax = p[2 * i], ay = p[2 * i + 1], bx = p[2 * i + 2], by = p[2 * i + 3], h0 = hb; hb = near(bx, by);
+          if (!h0 || !hb) continue;
+          const l = Math.hypot(bx - ax, by - ay); if (l < 0.5) continue;
+          const ref = h0.d < hb.d ? h0 : hb, cos = Math.abs(((bx - ax) * Math.sin(ref.psi) + (by - ay) * Math.cos(ref.psi)) / l);
+          if (cos > 0.9) continue;                                   // runs along the route: its own street or the other carriageway
+          let ja = null, side = 0;
+          if (h0.d < 7 && hb.d > h0.d + 5) { ja = h0.a; side = Math.sign(hb.side); }            // leaves the route here (a T, or one arm of a crossing)
+          else if (hb.d < 7 && h0.d > hb.d + 5) { ja = hb.a; side = Math.sign(h0.side); }
+          else if (h0.side * hb.side < 0 && Math.abs(h0.a - hb.a) < 80) { const t = Math.abs(h0.side) / (Math.abs(h0.side) + Math.abs(hb.side)); ja = h0.a + (hb.a - h0.a) * t; }
+          if (ja == null) continue;
+          const far = h0.d > hb.d ? [ax, ay] : [bx, by], nearP = h0.d > hb.d ? [bx, by] : [ax, ay], k = Math.min(1, 25 / l);
+          raw.push({ a: ja, side, w: r.w, cls: r.cls, sin: Math.sqrt(1 - cos * cos), nx: nearP[0] + (far[0] - nearP[0]) * k, ny: nearP[1] + (far[1] - nearP[1]) * k, ux: (bx - ax) / l, uy: (by - ay) / l });
+        }
+      }
+      raw.sort((p, q2) => p.a - q2.a);
+      for (const j of raw) {
+        let J = junctions[junctions.length - 1];
+        if (!J || j.a - J.a0 > 16) { J = { a: j.a, a0: j.a, sum: 0, n: 0, left: false, right: false, w: 0, half: 0, cls: j.cls, best: j, name: '', signal: false, stopUs: false }; junctions.push(J); }
+        J.sum += j.a; J.n++; J.a = J.sum / J.n;
+        if (j.side >= 0) J.right = true; if (j.side <= 0) J.left = true;
+        J.w = Math.max(J.w, j.w); J.half = Math.max(J.half, j.w / 2 / Math.max(0.5, j.sin) + 3);
+        if ((RANK[j.cls] || 0) > (RANK[J.cls] || 0)) { J.cls = j.cls; J.best = j; }
+      }
+      for (const J of junctions) { const b = J.best, nm = segNear(q.names, b.nx, b.ny, 16, b.ux, b.uy); J.name = nm ? nm.r.name : ''; delete J.best; }
+    }
+    const jNear = (a) => { for (const J of junctions) if (Math.abs(a - J.a) < J.half) return J; return null; };
+    /* signals and stop signs decide where stop lines are painted, so they are matched to junctions before the road is built */
+    const P = (a, lat, h) => { const p = path.pose(a, lat); return [p.x - O.x, p.y - O.y, zOf(a) + (h || 0)]; };
+    const jFor = (a, reach) => { let best = null, bd = 1e9; for (const J of junctions) { const d = Math.abs(a - J.a) - J.half; if (d < reach && d < bd) { bd = d; best = J; } } return best; };
+    const sigOff = [], stopList = [];
+    if (furn) {
+      for (const n of furn.signals) {
+        const hit = idx.nearest(n.x, n.y, 45);
+        if (!hit) { sigOff.push(n); continue; }
+        let J = jFor(hit.a, 30);
+        if (!J && hit.d < 12) { J = { a: hit.a, half: 4, left: false, right: false, w: 0, cls: '', name: '', signal: false, stopUs: false, mid: true }; junctions.push(J); }   // signal with no mapped side street (a crossing, or a driveway signal)
+        if (J) J.signal = true; else sigOff.push(n);
+      }
+      for (const n of furn.stops) {
+        const hit = idx.nearest(n.x, n.y, 60); if (!hit) continue;
+        const J = jFor(hit.a, 35), ours = hit.d < 5 && !!J && J.a >= hit.a - 1;
+        if (ours && n.k === 't') J.stopUs = true;
+        stopList.push({ n, hit, J, ours });
+      }
+    }
 
     /* ground height at any point = elevation of the nearest point on the road (the profile is only known along the road) */
     let lastZ = 0;
@@ -312,6 +384,7 @@
     /* ---- every mapped street (side streets, parking aisles, the opposite carriageway…) */
     const roadZ = 0.12, SUB = 10;
     const tileRoad = pack(PAL.asphalt[0] + 4, PAL.asphalt[1] + 4, PAL.asphalt[2] + 4, 0);
+    const cWhiteP = pack(PAL.white[0], PAL.white[1], PAL.white[2], 255), cYellowP = pack(PAL.yellow[0], PAL.yellow[1], PAL.yellow[2], 255);
     for (const r of q.roads) {
       const p = r.pts, n = p.length >> 1, hw = r.w / 2;
       // miter offsets per vertex
@@ -334,11 +407,21 @@
         // the street the route itself drives on is covered by the ribbon below: skip it (also avoids two coplanar layers)
         if (hit.d < 2.5 && sl > 1e-6 && Math.abs(((bx - ax) * Math.sin(hit.psi) + (by - ay) * Math.cos(hit.psi)) / sl) > 0.97) continue;
         const parts = Math.max(1, Math.ceil(sl / SUB));
+        const rank = RANK[r.cls] || 0, paint = rank < 2 ? null : r.oneway ? (r.w >= 8 ? [[-0.08, 0.08, cWhiteP, true]] : null) : rank >= 3 ? [[-0.24, -0.08, cYellowP], [0.08, 0.24, cYellowP]] : [[-0.07, 0.07, cYellowP, true]];
         let prev = null;
         for (let k = 0; k <= parts; k++) {   // subdivide so the street hugs the ground profile instead of cutting a long chord through it
-          const u = k / parts, cx = ax + (bx - ax) * u, cy = ay + (by - ay) * u, oxx = ox[i] + (ox[i + 1] - ox[i]) * u, oyy = oy[i] + (oy[i + 1] - oy[i]) * u, cz = groundZ(cx, cy) + roadZ;
+          const u = k / parts, cx = ax + (bx - ax) * u, cy = ay + (by - ay) * u, oxx = ox[i] + (ox[i + 1] - ox[i]) * u, oyy = oy[i] + (oy[i + 1] - oy[i]) * u;
+          const gh = idx.nearest(cx, cy, CORRIDOR + 90); if (gh) lastZ = zOf(gh.a); const cz = lastZ + roadZ, ol = Math.hypot(oxx, oyy) || 1;
           const cur = [[cx + oxx - O.x, cy + oyy - O.y, cz], [cx - oxx - O.x, cy - oyy - O.y, cz]];
-          if (prev) base.quad(prev[0], prev[1], cur[1], cur[0], tileRoad);
+          cur.c = [cx - O.x, cy - O.y, cz + 0.05]; cur.n = [oxx / ol, oyy / ol]; cur.clear = !gh || gh.d > 16;
+          if (prev) {
+            base.quad(prev[0], prev[1], cur[1], cur[0], tileRoad);
+            // lane paint by class (US practice, as on the route itself): two-way arterials a double yellow centre line, one-way carriageways white lane dashes
+            if (paint && prev.clear && cur.clear) for (const [o0, o1, pc, dash] of paint) {
+              if (dash && (k & 1)) continue;
+              base.quad([prev.c[0] + prev.n[0] * o0, prev.c[1] + prev.n[1] * o0, prev.c[2]], [prev.c[0] + prev.n[0] * o1, prev.c[1] + prev.n[1] * o1, prev.c[2]], [cur.c[0] + cur.n[0] * o1, cur.c[1] + cur.n[1] * o1, cur.c[2]], [cur.c[0] + cur.n[0] * o0, cur.c[1] + cur.n[1] * o0, cur.c[2]], pc);
+            }
+          }
           prev = cur;
         }
         stats.roads++;
@@ -359,12 +442,13 @@
     };
     const cAsph = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 0), cShl = pack(PAL.shoulder[0], PAL.shoulder[1], PAL.shoulder[2], 0);
     for (let i = 0; i + 1 < slices.length; i++) {
-      const s = secs[i];
-      if (s.shL > 0) band(i, -s.hw - s.shL, -s.hw, rz - 0.02, cShl);
-      if (s.shR > 0) band(i, s.hw, s.hw + s.shR, rz - 0.02, cShl);
+      const s = secs[i], J = jNear((slices[i].a + slices[i + 1].a) / 2);
+      if (s.shL > 0 && !(J && J.left)) band(i, -s.hw - s.shL, -s.hw, rz - 0.02, cShl);
+      if (s.shR > 0 && !(J && J.right)) band(i, s.hw, s.hw + s.shR, rz - 0.02, cShl);
       band(i, -s.hw, s.hw, rz, cAsph);
       for (const ln of s.lines) {
         if (ln.dash) continue;
+        if (J && !J.mid) { const m = (ln.x0 + ln.x1) / 2; if (Math.abs(m) < 0.5 || (m > 0 ? J.right : J.left)) continue; }   // no centre line through a junction, no edge line across a side street
         band(i, ln.x0, ln.x1, lz, pack(ln.c[0], ln.c[1], ln.c[2], 255));
       }
     }
@@ -379,6 +463,7 @@
         const m0 = Math.floor(s0.a / per), m1 = Math.floor(s1.a / per);
         for (let m = m0; m <= m1; m++) {
           const da = Math.max(s0.a, m * per), db = Math.min(s1.a, m * per + on); if (db - da < 0.3) continue;
+          const Jd = jNear((da + db) / 2); if (Jd && !Jd.mid) continue;
           const t0_ = (da - s0.a) / span, t1_ = (db - s0.a) / span, f0 = fr[i], f1 = fr[i + 1];
           const mix = (t) => ({ x: f0.x + (f1.x - f0.x) * t, y: f0.y + (f1.y - f0.y) * t, nx: f0.nx + (f1.nx - f0.nx) * t, ny: f0.ny + (f1.ny - f0.ny) * t, z: f0.z + (f1.z - f0.z) * t });
           const g0 = mix(t0_), g1 = mix(t1_);
@@ -440,6 +525,112 @@
       nb++;
     }
     stats.buildings = nb; lap('buildings');
+
+    /* ---- street furniture: signals, stop/yield signs, lamps, crosswalks — each one exactly where OpenStreetMap maps it */
+    stats.signals = 0; stats.stops = 0; stats.lamps = 0; stats.crossings = 0;
+    {
+      const pk = (c, m) => pack(c[0], c[1], c[2], m || 0);
+      const cPole = pk([104, 108, 112]), cPlate = pk([24, 24, 26]), cBack = pk([40, 42, 46]), cLens = pk([78, 80, 86]), cRim = pk([232, 190, 44], 255);
+      const cRed = pk([196, 30, 38], 255), cWht = pk([240, 240, 235], 255), cGrey = pk([150, 152, 156]);
+      const vquad = (cx, cy, cz, ux, uy, w, h, c) => detail.quad([cx - ux * w / 2, cy - uy * w / 2, cz - h / 2], [cx + ux * w / 2, cy + uy * w / 2, cz - h / 2], [cx + ux * w / 2, cy + uy * w / 2, cz + h / 2], [cx - ux * w / 2, cy - uy * w / 2, cz + h / 2], c);
+      const pole = (x, y, z0_, z1, r, c) => { detail.quad([x - r, y, z0_], [x + r, y, z0_], [x + r, y, z1], [x - r, y, z1], c); detail.quad([x, y - r, z0_], [x, y + r, z0_], [x, y + r, z1], [x, y - r, z1], c); };
+      const beam = (x0, y0, x1, y1, z, r, c) => { const dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy) || 1, nx = (-dy / l) * r, ny = (dx / l) * r; detail.quad([x0, y0, z - r], [x1, y1, z - r], [x1, y1, z + r], [x0, y0, z + r], c); detail.quad([x0 - nx, y0 - ny, z], [x1 - nx, y1 - ny, z], [x1 + nx, y1 + ny, z], [x0 + nx, y0 + ny, z], c); };
+      const disc = (cx, cy, cz, ux, uy, r, n, rot, c) => { for (let s = 0; s < n; s++) { const p0_ = rot + (s / n) * TAU, p1_ = rot + ((s + 1) / n) * TAU; detail.tri(cx, cy, cz, cx + ux * Math.cos(p0_) * r, cy + uy * Math.cos(p0_) * r, cz + Math.sin(p0_) * r, cx + ux * Math.cos(p1_) * r, cy + uy * Math.cos(p1_) * r, cz + Math.sin(p1_) * r, c); } };
+
+      /* A signal head facing (fx,fy). Its three lenses are drawn dark: what the light is showing right now is not in any
+       * public data, so it is never guessed. The head says "there is a signal here", nothing more. */
+      const HS = 1.5;   // drawn larger than life, like the road signs, so it reads at a distance
+      const head = (x, y, z, fx, fy) => {
+        const ux = fy, uy = -fx;
+        vquad(x - fx * 0.06, y - fy * 0.06, z, ux, uy, 0.66 * HS, 1.46 * HS, cBack);
+        vquad(x, y, z, ux, uy, 0.66 * HS, 1.46 * HS, cRim);
+        vquad(x + fx * 0.06, y + fy * 0.06, z, ux, uy, 0.54 * HS, 1.34 * HS, cPlate);
+        for (const dz of [0.41, 0, -0.41]) disc(x + fx * 0.12, y + fy * 0.12, z + dz * HS, ux, uy, 0.155 * HS, 8, 0.39, cLens);
+      };
+      const mast = (pa, plat, ea, elat, heads, fx, fy) => {
+        const b = P(pa, plat), e = P(ea, elat), zt = b[2] + 7.1;
+        pole(b[0], b[1], b[2], zt + 0.35, 0.15, cPole); beam(b[0], b[1], e[0], e[1], zt, 0.1, cPole);
+        for (const [ha, hl] of heads) { const hp = P(ha, hl); head(hp[0], hp[1], b[2] + 5.95, fx, fy); }
+      };
+      for (const J of junctions) {
+        if (!J.signal || !own(J.a)) continue;
+        const s = secAt(J.a), ps = path.pose(J.a).psi, fx = Math.sin(ps), fy = Math.cos(ps), rx = fy, ry = -fx;
+        const latR = s.hw + s.shR + 1.6, latL = -(s.hw + s.shL + 1.6), aFar = J.a + J.half + 1.5, aNear = J.a - J.half - 1.5;
+        // facing the route's own traffic: a mast arm from the far-right corner, a head over each of its lanes
+        const lanes = s.multi ? Array.from({ length: Math.min(3, s.lanes) }, (_, i) => -s.hw + (s.w * (i + 0.5)) / s.lanes) : s.hw >= 4.4 ? [s.hw * 0.28, s.hw * 0.72] : [s.hw * 0.5];
+        mast(aFar, latR, aFar, Math.min(...lanes) - 0.9, lanes.map((l) => [aFar, l]), -fx, -fy);
+        if (!s.multi) mast(aNear, latL, aNear, -s.hw * 0.5 + 0.9, [[aNear, -s.hw * 0.5]], fx, fy);                       // facing oncoming traffic
+        if (J.right) mast(aFar, latL, J.a - 0.5, latL, [[J.a + Math.max(0.8, Math.min(J.half - 1, J.w * 0.25)), latL]], rx, ry);   // facing each side street
+        if (J.left) mast(aNear, latR, J.a + 0.5, latR, [[J.a - Math.max(0.8, Math.min(J.half - 1, J.w * 0.25)), latR]], -rx, -ry);
+        // the stop line is where the signal makes the route's traffic wait
+        const x0 = s.multi ? -s.hw + 0.5 : 0.3, sa = J.a - J.half - 0.4;
+        base.quad(P(sa - 0.6, x0, lz + 0.01), P(sa - 0.6, s.hw - 0.5, lz + 0.01), P(sa, s.hw - 0.5, lz + 0.01), P(sa, x0, lz + 0.01), cWht);
+        stats.signals++;
+      }
+      // signals away from the route (on streets the route does not touch): a post either side, one head each way
+      for (const n of sigOff) {
+        const hit = idx.nearest(n.x, n.y, BUILD_REACH); if (!hit || !own(hit.a)) continue;
+        const rd = segNear(q.roads, n.x, n.y, 15); if (!rd) continue;
+        const z = zOf(hit.a), off = rd.r.w / 2 + 1.2, x = n.x - O.x, y = n.y - O.y;
+        for (const sg of [1, -1]) { const px = x + rd.uy * off * sg, py = y - rd.ux * off * sg; pole(px, py, z, z + 3.3, 0.1, cPole); head(px, py, z + 4.3, -rd.ux * sg, -rd.uy * sg); }
+        stats.signals++;
+      }
+
+      /* stop (octagon) and yield (triangle) signs face the traffic they control */
+      const sign = (x, y, z, fx, fy, kind) => {
+        const ux = fy, uy = -fx, zc = z + 2.75;
+        pole(x, y, z, zc, 0.05, cGrey);
+        if (kind === 't') { disc(x - fx * 0.06, y - fy * 0.06, zc, ux, uy, 0.74, 8, 0.3927, cGrey); disc(x, y, zc, ux, uy, 0.74, 8, 0.3927, cWht); disc(x + fx * 0.06, y + fy * 0.06, zc, ux, uy, 0.66, 8, 0.3927, cRed); }
+        else { disc(x - fx * 0.06, y - fy * 0.06, zc, ux, uy, 0.9, 3, -Math.PI / 2, cGrey); disc(x, y, zc, ux, uy, 0.9, 3, -Math.PI / 2, cRed); disc(x + fx * 0.06, y + fy * 0.06, zc, ux, uy, 0.5, 3, -Math.PI / 2, cWht); }
+      };
+      for (const { n, hit, J, ours } of stopList) {
+        if (!own(hit.a)) continue;
+        const s = secAt(hit.a), ps = path.pose(hit.a).psi, fx = Math.sin(ps), fy = Math.cos(ps);
+        if (hit.d < 5) {
+          if (!J) continue;   // on the route but no junction nearby: which direction it controls is unknown
+          const p = ours ? P(hit.a, s.hw + s.shR + 1.3) : P(hit.a, -(s.hw + s.shL + 1.3));
+          sign(p[0], p[1], p[2], ours ? -fx : fx, ours ? -fy : fy, n.k);
+          if (ours && n.k === 't') { const x0 = s.multi ? -s.hw + 0.5 : 0.3; base.quad(P(hit.a - 0.6, x0, lz + 0.01), P(hit.a - 0.6, s.hw - 0.5, lz + 0.01), P(hit.a, s.hw - 0.5, lz + 0.01), P(hit.a, x0, lz + 0.01), cWht); }
+        } else if (hit.d < 45) {
+          // on a side street: it faces the traffic that is approaching the route
+          let vx = hit.x - n.x, vy = hit.y - n.y; const vl = Math.hypot(vx, vy) || 1; vx /= vl; vy /= vl;
+          const rd = segNear(q.roads, n.x, n.y, 8), off = (rd ? rd.r.w / 2 : 3.3) + 1.3;
+          sign(n.x + vy * off - O.x, n.y - vx * off - O.y, zOf(hit.a), -vx, -vy, n.k);
+        } else continue;
+        stats.stops++;
+      }
+
+      /* marked crosswalks: ladder bars across the street the crossing node sits on */
+      if (furn) for (const n of furn.crossings) {
+        const hit = idx.nearest(n.x, n.y, 40); if (!hit || !own(hit.a)) continue;
+        const s = secAt(hit.a);
+        if (hit.d < 4.5) {
+          for (let l = -s.hw + 0.45; l + 0.55 <= s.hw - 0.4; l += 1.15) base.quad(P(hit.a - 1.5, l, lz + 0.01), P(hit.a - 1.5, l + 0.55, lz + 0.01), P(hit.a + 1.5, l + 0.55, lz + 0.01), P(hit.a + 1.5, l, lz + 0.01), cWht);
+        } else if (hit.d > s.hw + 1) {
+          const rd = segNear(q.roads, n.x, n.y, 6); if (!rd || MINOR[rd.r.cls]) continue;
+          const z = zOf(hit.a) + roadZ + 0.07, hw2 = rd.r.w / 2, px = -rd.uy, py = rd.ux, x = n.x - O.x, y = n.y - O.y, dx = rd.ux * 1.5, dy = rd.uy * 1.5;
+          for (let l = -hw2 + 0.4; l + 0.55 <= hw2 - 0.35; l += 1.15) base.quad([x + px * l - dx, y + py * l - dy, z], [x + px * (l + 0.55) - dx, y + py * (l + 0.55) - dy, z], [x + px * (l + 0.55) + dx, y + py * (l + 0.55) + dy, z], [x + px * l + dx, y + py * l + dy, z], cWht);
+        } else continue;
+        stats.crossings++;
+      }
+
+      /* street lamps: a pole with an arm reaching toward the street; the shader lights the luminaire after dusk (alpha 128 = emissive) */
+      const cWarm = pk([255, 214, 150], 128), cCool = pk([236, 242, 255], 128); let nl = 0;
+      if (furn) for (const n of furn.lamps) {
+        if (nl >= 400) break;
+        const hit = idx.nearest(n.x, n.y, TREE_REACH); if (!hit || !own(hit.a)) continue;
+        const z = zOf(hit.a), x = n.x - O.x, y = n.y - O.y; let dx = 0, dy = 0;
+        if (hit.d > 0.5 && hit.d < 30) { dx = (hit.x - n.x) / hit.d; dy = (hit.y - n.y) / hit.d; }
+        else { const rd = segNear(q.roads, n.x, n.y, 25); if (rd && rd.d > 0.5) { dx = (rd.qx - n.x) / rd.d; dy = (rd.qy - n.y) / rd.d; } }
+        const LH = 9, arm = dx || dy ? 2.2 : 0, ex = x + dx * arm, ey = y + dy * arm, c = n.cool ? cCool : cWarm, ux = dx || dy ? dx : 1, uy = dx || dy ? dy : 0, zl = z + LH - 0.14;
+        pole(x, y, z, z + LH, 0.09, cPole); if (arm) beam(x, y, ex, ey, z + LH, 0.07, cPole);
+        detail.quad([ex - ux * 0.5 + uy * 0.22, ey - uy * 0.5 - ux * 0.22, zl], [ex + ux * 0.5 + uy * 0.22, ey + uy * 0.5 - ux * 0.22, zl], [ex + ux * 0.5 - uy * 0.22, ey + uy * 0.5 + ux * 0.22, zl], [ex - ux * 0.5 - uy * 0.22, ey - uy * 0.5 + ux * 0.22, zl], c);
+        vquad(ex, ey, zl - 0.08, uy, -ux, 0.5, 0.26, c); vquad(ex, ey, zl - 0.08, ux, uy, 0.95, 0.26, c);
+        nl++;
+      }
+      stats.lamps = nl;
+    }
+    lap('furniture');
     yield; sliceT = Date.now(); tl = sliceT;
 
     /* ---- trees: only where OpenStreetMap maps woods / parks / wetland (nothing is invented elsewhere) */
@@ -487,7 +678,7 @@
     }
     stats.trees = nt; lap('trees');
     stats.ms = Date.now() - t0; stats.stages = tm;
-    return { k, a0, a1, origin: O, base: base.done(), detail: detail.done(), bb, need: q.need, have: q.have, sig, slices: { a: aArr, cam: camArr, cls: clsArr, x: slices.map((q2) => q2.x), y: slices.map((q2) => q2.y), z: slices.map((q2) => zOf(q2.a)) }, stats };
+    return { k, a0, a1, origin: O, base: base.done(), detail: detail.done(), bb, need: q.need, have: q.have, needF: furn ? furn.need : [], sig, junctions: junctions.filter((J) => own(J.a) && !J.mid).map((J) => ({ a: J.a, half: J.half, name: J.name, left: J.left, right: J.right, signal: J.signal, stop: J.stopUs, cls: J.cls })), slices: { a: aArr, cam: camArr, cls: clsArr, x: slices.map((q2) => q2.x), y: slices.map((q2) => q2.y), z: slices.map((q2) => zOf(q2.a)) }, stats };
   };
 
   /** build a chunk to completion (tests, and the first frames of a trip) */

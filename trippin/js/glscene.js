@@ -34,14 +34,15 @@ uniform vec3 uSunDir, uSunCol, uAmb, uFogCol, uHeadCol; uniform float uFogD, uHe
 uniform sampler2D uTex;
 out vec4 o;
 void main(){
-  vec3 base = vCol.rgb; float refl = vCol.a;
-  if (vUV.x >= 0.0) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; }
+  vec3 base = vCol.rgb; float em = step(0.4, vCol.a) * step(vCol.a, 0.6); float refl = vCol.a * (1.0 - em);
+  if (vUV.x >= 0.0) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; em = 0.0; }
   vec3 n = -normalize(cross(dFdx(vView), dFdy(vView)));
   if (dot(n, vView) > 0.0) n = -n;
   float dist = length(vView);
   float ndl = max(dot(n, uSunDir), 0.0);
   float hl = uHead * exp(-dist/42.0) * (0.3 + 0.7*max(dot(n, -vView/dist), 0.0));
   vec3 c = base * (uAmb + uSunCol*ndl + uHeadCol*hl*(1.0 + 5.0*refl));
+  c = mix(c, base, em * clamp((uHead - 0.2) * 4.0, 0.0, 1.0));   // lamps come on as the daylight goes
   c = mix(c, uFogCol, 1.0 - exp(-dist/uFogD));
   o = vec4(c, 1.0);
 }`;
@@ -95,7 +96,7 @@ void main(){
       gl.bindVertexArray(null); return { vao, buf: b, n };
     }
     /** the world-tile set a chunk was built with vs. what is available now (+ whether elevation has arrived since) */
-    _sigNow(c, elevAt) { const w = MP.world, have = c.need.filter((k) => { const t = w.tiles.get(k); return t && t.state === 'ok'; }); return have.join(',') + '|' + ((elevAt && elevAt(0) != null) ? 1 : 0); }
+    _sigNow(c, elevAt) { const w = MP.world, have = c.need.filter((k) => { const t = w.tiles.get(k); return t && t.state === 'ok'; }); const st = MP.street && c.needF ? MP.street.have(c.needF) : []; return have.join(',') + '|' + st.join(',') + '|' + ((elevAt && elevAt(0) != null) ? 1 : 0); }
 
     /** start building chunk k as a time-sliced job (only one runs at a time) */
     _start(s, k, ctx) {
@@ -145,7 +146,12 @@ void main(){
         };
         const cell = { col: i % 2, row: (i / 2) | 0 };
         const u0 = (cell.col * SW) / (SW * 2), u1 = ((cell.col + 1) * SW) / (SW * 2), v0 = (cell.row * SH) / (SH * 4), v1 = ((cell.row + 1) * SH) / (SH * 4);
-        if (g.kind === 'gantry') {
+        if (g.kind === 'street') {
+          // street-name blade (drawn larger than life so it can be read); it uses the middle band of its atlas cell
+          const lat = ctx.edge + 1.9, w = 4.2, vm0 = v0 + (v1 - v0) * 0.25, vm1 = v0 + (v1 - v0) * 0.75;
+          post(lat, 4.1, 0.07);
+          texQuad(v, [P(lat - w / 2, 3.15), P(lat + w / 2, 3.15), P(lat + w / 2, 4.2), P(lat - w / 2, 4.2)], u0, vm0, u1, vm1);
+        } else if (g.kind === 'gantry') {
           // overhead exit sign: two posts, a cross-beam, and a panel hung below it (drawn larger than life so it stays legible)
           post(-5.4, 9.8, 0.24); post(8.0, 9.8, 0.24);
           quadC(v, P(-5.4, 9.0), P(8.0, 9.0), P(8.0, 9.6), P(-5.4, 9.6), grey);
@@ -193,6 +199,7 @@ void main(){
       // scenery tiles: under the car and ahead
       const pts = []; for (const d of [0, 500, 1000, 1600, 2300]) { const pp = s.path.pose(Math.min(route.total, A + d)); pts.push({ lat: pp.y / route.ky, lng: pp.x / route.kx }); }
       if (!cam.noWorld && MP.world) MP.world.want(pts, !!cam.snap);
+      if (!cam.noWorld && MP.street) MP.street.want(pts, !!cam.snap);
 
       // which chunks are in view; build the missing / stale ones, nearest first, a few milliseconds per frame
       // (a jump — first frame, time-travel scrub — builds the two nearest synchronously so the view is never empty)
@@ -234,7 +241,11 @@ void main(){
       }
       // signs (dynamic, camera-relative)
       const zOf = (a) => (elevRaw(a) - z0cam) * EX;
-      const sv = this._signs(cam.signs, { x: pose.x, y: pose.y }, s, { along: cam.along, zOf, camH, edge: 6.5 });
+      const ahead = [];
+      if (!cam.noWorld) for (const c of chunks) for (const J of c.junctions || []) { const d = J.a - cam.along; if (J.name && d > 6 && d < 420) ahead.push({ kind: 'street', d: d + J.half + 2.5, text: blade(J.name), sub: '', side: 'right', j: J }); }
+      ahead.sort((p, q) => p.d - q.d);
+      this.junctionsAhead = ahead.map((g) => ({ d: g.j.a - cam.along, name: g.j.name, signal: g.j.signal, stop: g.j.stop }));
+      const sv = this._signs((cam.signs || []).slice(0, 4).concat(ahead.slice(0, 4)), { x: pose.x, y: pose.y }, s, { along: cam.along, zOf, camH, edge: 6.5 });
       if (sv) {
         const gl2 = gl; if (!this.signVao) { this.signVao = gl2.createVertexArray(); this.signBuf = gl2.createBuffer(); }
         gl2.bindVertexArray(this.signVao); gl2.bindBuffer(gl2.ARRAY_BUFFER, this.signBuf); gl2.bufferData(gl2.ARRAY_BUFFER, sv, gl2.DYNAMIC_DRAW);
@@ -265,7 +276,17 @@ void main(){
 
   function rr(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
   /** a sign face painted into the atlas cell at (ox,oy) sized w×h */
+  /** a street name the way a blade sign abbreviates it */
+  const ABBR = { Drive: 'Dr', Road: 'Rd', Avenue: 'Ave', Boulevard: 'Blvd', Street: 'St', Court: 'Ct', Lane: 'Ln', Highway: 'Hwy', Parkway: 'Pkwy', Place: 'Pl', Circle: 'Cir', Trail: 'Trl', Terrace: 'Ter', Square: 'Sq', North: 'N', South: 'S', East: 'E', West: 'W' };
+  function blade(name) { const w = String(name).split(' '); return w.map((x, i) => ((i === w.length - 1 && w.length > 1) || (i === 0 && w.length > 2 && /^(North|South|East|West)$/.test(x)) ? ABBR[x] || x : x)).join(' ').slice(0, 22); }
   function drawSignFace(c, ox, oy, w, h, g) {
+    if (g.kind === 'street') {
+      c.save(); c.translate(ox, oy);
+      c.fillStyle = '#0b6b3c'; c.fillRect(0, h * 0.25, w, h * 0.5);
+      c.strokeStyle = '#fff'; c.lineWidth = 5; c.strokeRect(5, h * 0.25 + 5, w - 10, h * 0.5 - 10);
+      c.fillStyle = '#fff'; c.textBaseline = 'middle'; c.textAlign = 'center'; c.font = '800 92px "Barlow Condensed", sans-serif'; c.fillText(g.text || '', w / 2, h * 0.5 + 4, w - 44);
+      c.restore(); return;
+    }
     const col = g.kind === 'gantry' ? '#08683e' : g.kind === 'service' ? '#0a46a0' : g.kind === 'story' ? '#5c381c' : '#0a6a3f';
     c.save(); c.translate(ox, oy);
     c.fillStyle = col; rr(c, 2, 2, w - 4, h - 4, 18); c.fill();

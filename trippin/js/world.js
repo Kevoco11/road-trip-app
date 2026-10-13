@@ -21,7 +21,7 @@
 
   const CFG = (W.cfg = {
     tilejson: 'https://tiles.openfreemap.org/planet', Z: 14, EXT: 4096, keep: 16, concurrency: 3,
-    layers: ['building', 'landcover', 'landuse', 'park', 'water', 'transportation'],
+    layers: ['building', 'landcover', 'landuse', 'park', 'water', 'transportation', 'transportation_name'],
   });
 
   /* land-cover kinds. `p` is paint priority (higher paints over lower), `k` the id the raster stores */
@@ -74,7 +74,7 @@
 
   /** decoded MVT layers → what the renderer needs (tile units, y south) */
   W.compact = function (layers, x, y) {
-    const E = CFG.EXT, out = { x, y, z: CFG.Z, buildings: [], covers: [], roads: [], at: Date.now() };
+    const E = CFG.EXT, out = { x, y, z: CFG.Z, buildings: [], covers: [], roads: [], names: [], at: Date.now() };
     const inCore = (bb) => { const cx = (bb[0] + bb[2]) / 2, cy = (bb[1] + bb[3]) / 2; return cx >= 0 && cx < E && cy >= 0 && cy < E; };
     if (layers.building) for (const ft of layers.building.features) {
       const h = Math.max(2.5, Number(ft.props.render_height) || 6), minH = Number(ft.props.render_min_height) || 0;
@@ -102,8 +102,13 @@
       if (ft.props.brunnel === 'tunnel') continue;       // underground: nothing to see from the road
       for (const r of ft.rings) {
         if (r.length < 4) continue;
-        out.roads.push({ cls: c, w, bridge: ft.props.brunnel === 'bridge', oneway: ft.props.oneway === 1 || ft.props.oneway === '1', ramp: ft.props.ramp === 1 || ft.props.ramp === '1', pts: f32(r), bb: polyBBox(r) });
+        out.roads.push({ cls: c, w, bridge: ft.props.brunnel === 'bridge', oneway: ft.props.oneway === 1 || ft.props.oneway === '1', ramp: ft.props.ramp === 1 || ft.props.ramp === '1', svc: ft.props.service || '', pts: f32(r), bb: polyBBox(r) });
       }
+    }
+    // street names travel in their own layer (label lines that follow the streets)
+    if (layers.transportation_name) for (const ft of layers.transportation_name.features) {
+      const name = ft.props.name || ft.props['name:latin'] || ft.props.ref; if (!name || !ROADW[ft.props.class]) continue;
+      for (const r of ft.rings || []) if (r.length >= 4) out.names.push({ name: String(name), pts: f32(r), bb: polyBBox(r) });
     }
     return out;
   };
@@ -124,10 +129,11 @@
       return o;
     };
     const box = (o) => polyBBox(o);
-    const L = { key, buildings: [], covers: [], roads: [] };
+    const L = { key, buildings: [], covers: [], roads: [], names: [] };
     for (const b of tile.buildings) { const ring = conv(b.ring); L.buildings.push({ ring, h: b.h, minH: b.minH, bb: box(ring) }); }
     for (const c of tile.covers) { const outer = conv(c.outer); L.covers.push({ kind: c.kind, p: c.p, outer, holes: c.holes.map(conv), bb: box(outer), cls: c.cls }); }
-    for (const r of tile.roads) { const pts = conv(r.pts); L.roads.push({ cls: r.cls, w: r.w, bridge: r.bridge, oneway: r.oneway, ramp: r.ramp, pts, bb: box(pts) }); }
+    for (const r of tile.roads) { const pts = conv(r.pts); L.roads.push({ cls: r.cls, w: r.w, bridge: r.bridge, oneway: r.oneway, ramp: r.ramp, svc: r.svc, pts, bb: box(pts) }); }
+    for (const nm of tile.names || []) { const pts = conv(nm.pts); L.names.push({ name: nm.name, pts, bb: box(pts) }); }
     tile.local = L; return L;
   }
   W.localize = localize;
@@ -148,7 +154,7 @@
 
   /** features from every loaded tile that overlaps bb (route metres). `need`/`have` let callers know whether to rebuild later */
   W.query = function (frame, bb) {
-    const need = W.tilesFor(frame, bb), res = { buildings: [], covers: [], roads: [], need: [], have: [] };
+    const need = W.tilesFor(frame, bb), res = { buildings: [], covers: [], roads: [], names: [], need: [], have: [] };
     const hit = (b) => !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3]);
     for (const [x, y] of need) {
       const k = keyOf(x, y); res.need.push(k);
@@ -159,6 +165,7 @@
       for (const b of L.buildings) if (hit(b.bb)) res.buildings.push(b);
       for (const c of L.covers) if (hit(c.bb)) res.covers.push(c);
       for (const r of L.roads) if (hit(r.bb)) res.roads.push(r);
+      for (const nm of L.names) if (hit(nm.bb)) res.names.push(nm);
     }
     res.covers.sort((a, b) => a.p - b.p);
     return res;

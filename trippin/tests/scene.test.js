@@ -7,7 +7,7 @@ const path = require('path'), fs = require('fs');
 const { eq, near, MP } = require('./unit.js');
 const L = (f) => require(path.join(__dirname, '../js', f));
 const F = (f) => fs.readFileSync(path.join(__dirname, 'fixtures', f));
-L('mvt.js'); L('path.js'); const WORLD = L('world.js'); const TER = L('terrain.js');
+L('mvt.js'); L('path.js'); const WORLD = L('world.js'); const STREET = L('street.js'); const TER = L('terrain.js');
 
 const tests = [];
 const t = (name, fn) => tests.push([name, fn]);
@@ -279,6 +279,40 @@ t('update() keeps one path while the car stays on it', async () => {
     const q = a.route.pointAt(a.along + 40), b = FRD.update({ lat: q.lat, lng: q.lng, heading: q.bearing, speed: 12 }, {}, 1e6 + 3000);
     ok(b && b.route === a.route, 'same path 40 m later'); ok(b.along > a.along + 30, 'progress along it');
   } finally { WORLD.want = want; }
+});
+
+group('junctions, signals, signs and lamps (real OpenStreetMap nodes)');
+// fixtures/overpass-street-14-4413-6046.json is the REAL Overpass reply for the same Sterling Heights tile.
+const streetEls = () => JSON.parse(F('overpass-street-14-4413-6046.json').toString()).elements;
+const loadStreet = async (r) => { STREET.reset(); STREET.fetchImpl = async () => streetEls(); STREET.want([r.pointAt(0)], true); await wait(40); };
+t('parses signals, stop/yield signs, lamps and marked crosswalks; never a signal state', () => {
+  const n = STREET.parse(streetEls()), by = {}; for (const x of n) by[x.k] = (by[x.k] || 0) + 1;
+  ok(by.s >= 10 && by.t >= 30 && by.l >= 30 && by.y >= 5 && by.c >= 20, JSON.stringify(by));
+  for (const x of n) { ok(isFinite(x.lat) && isFinite(x.lng), 'position'); ok(!('state' in x) && !('color' in x) && !('phase' in x), 'no invented signal state'); }
+  eq(STREET.parse([{ type: 'node', lat: 1, lon: 2, tags: { highway: 'crossing', crossing: 'unmarked' } }, { type: 'node', lat: 1, lon: 2, tags: { highway: 'crossing' } }]).length, 0, 'a crossing with no confirmed paint is not drawn');
+  ok(/traffic_signals/.test(STREET.queryFor(2206, 3023)) && /street_lamp/.test(STREET.queryFor(2206, 3023)), 'one query per cell');
+});
+t('junctions carry the real cross-street name; signalised ones are flagged only where a signal is mapped', async () => {
+  const r = await loadTile(); await loadStreet(r);
+  const js = []; for (let k = 0; k * TER.CH < r.total; k++) js.push(...TER.buildChunk(ctxFor(r), k).junctions);
+  const names = js.map((j) => j.name).filter(Boolean);
+  ok(names.includes('17 Mile Road') && names.includes('Van Dyke Avenue') && names.includes('Arcola Drive'), 'real names: ' + names.join(', '));
+  const seventeen = js.find((j) => j.name === '17 Mile Road'); ok(seventeen.signal && seventeen.left && seventeen.right, '17 Mile Road is a signalised crossing');
+  const arcola = js.find((j) => j.name === 'Arcola Drive'); ok(!arcola.signal, 'Arcola Drive has no mapped signal, so none is drawn');
+  for (let i = 1; i < js.length; i++) ok(js[i].a > js[i - 1].a, 'each junction belongs to exactly one chunk, in order');
+});
+t('signal masts, signs, lamps and crosswalks are built — and nothing without the data', async () => {
+  const r = await loadTile(); await loadStreet(r);
+  const tot = { signals: 0, stops: 0, lamps: 0, crossings: 0 }; let withData = 0;
+  for (let k = 0; k * TER.CH < r.total; k++) { const c = TER.buildChunk(ctxFor(r), k); for (const key in tot) tot[key] += c.stats[key]; withData += c.detail.n; ok(c.needF.some((key2) => c.sig.includes(key2)), 'chunk remembers which street cell it used'); }
+  ok(tot.signals >= 3 && tot.stops >= 5 && tot.lamps >= 20 && tot.crossings >= 3, JSON.stringify(tot));
+  STREET.reset(); let without = 0;
+  for (let k = 0; k * TER.CH < r.total; k++) { const c = TER.buildChunk(ctxFor(r), k); without += c.detail.n; eq(c.stats.signals + c.stats.stops + c.stats.lamps + c.stats.crossings, 0); ok(c.junctions.every((j) => !j.signal), 'no signal without a mapped signal'); }
+  ok(withData > without, 'the furniture adds geometry');
+});
+t('the road markings open up at a side street', async () => {
+  const r = await loadTile(), c = TER.buildChunk(ctxFor(r), 1), plain = TER.buildChunk(ctxFor(r, { noWorld: true }), 1);
+  ok(c.junctions.length >= 2 && plain.junctions.length === 0, 'junctions come only from mapped streets');
 });
 
 // ---------------------------------------------------------------- runner

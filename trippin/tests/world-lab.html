@@ -3,13 +3,15 @@
      nothing here is shipped. Drive it from Playwright: await window.shot({along, h, m, wx, signs}) then screenshot #c. -->
 <style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
 body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block}</style></head><body><canvas id="c"></canvas>
-<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/terrain.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
 <script>
 (async () => {
   const route = MP.Route.fromOSRM(await (await fetch('fixtures/osrm-sterling.json')).json(), ['Start', 'End']);
   const tileBuf = await (await fetch('fixtures/tile-14-4413-6046.pbf')).arrayBuffer();
   MP.world.fetchImpl = async (url) => url.endsWith('/planet') ? { ok: true, status: 200, json: async () => ({ tiles: ['https://lab/{z}/{x}/{y}.pbf'] }) }
     : /\/4413\/6046\.pbf$/.test(url) ? { ok: true, status: 200, arrayBuffer: async () => tileBuf } : { ok: true, status: 204, arrayBuffer: async () => new ArrayBuffer(0) };
+  const streetEls = (await (await fetch('fixtures/overpass-street-14-4413-6046.json')).json()).elements;   // REAL Overpass reply for the same tile
+  MP.street.fetchImpl = async () => streetEls;
   const cv = document.getElementById('c'), sc = new MP.Scene(cv);
   const W = 400, H = 760; sc.resize(W, H, 1); cv.style.width = W + 'px'; cv.style.height = H + 'px';
   const elev = (a) => 200 + 9 * Math.sin(a / 700);
@@ -20,7 +22,7 @@ body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:blo
     const wx = o.wx || { cloud: 0.3 };
     const st = () => ({ ms, lat: p.lat, lng: p.lng, heading: p.bearing, along, route, speed: 12, wx, elevAt: o.flat ? null : elev, signs: o.signs || [], hy: o.hy || 250 });
     sc.noWorld = !!o.noWorld; sc._lastAlong = null; sc.camOverride = o.cam || null;
-    MP.world.want([p], true);
+    MP.world.want([p], true); MP.street.want([p], true);
     for (let i = 0; i < 40; i++) {
       sc.render(st(), 0.033);
       const t = MP.world.tiles.get('4413/6046'); const pending = !o.noWorld && (!t || t.state === 'load');
