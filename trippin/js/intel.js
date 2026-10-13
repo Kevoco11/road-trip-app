@@ -95,14 +95,19 @@
     const path = pts.map((c) => c.lng.toFixed(6) + ',' + c.lat.toFixed(6)).join(';');
     const names = pts.map((p) => p.name || '');
     const alt = !!o.alternatives && pts.length === 2;
-    const qs = (excl) => 'overview=full&geometries=polyline6&steps=true&alternatives=' + (alt ? 'true' : 'false') + (excl ? '&exclude=' + excl : '');
+    // a moving car asks for a road that leaves in the direction it is travelling (no "make a U-turn" from a re-route)
+    const brg = o.bearing != null && isFinite(o.bearing) ? '&bearings=' + (((Math.round(o.bearing) % 360) + 360) % 360) + ',60' + ';'.repeat(pts.length - 1) : '';
+    const qs = (excl, b) => 'overview=full&geometries=polyline6&steps=true&alternatives=' + (alt ? 'true' : 'false') + (excl ? '&exclude=' + excl : '') + (b || '');
     let json = null, lastErr = null, avoidApplied = false;
     for (const base of CFG.osrm) {
       try {
         if (o.avoidTolls) {
-          try { const j = await getJSON(base + path + '?' + qs('toll'), { svc: 'routing', timeout: 45000, tries: 1, allowBody: true }); if (j && j.code === 'Ok') { json = j; avoidApplied = true; } } catch (e) { /* server may not support exclude */ }
+          try { const j = await getJSON(base + path + '?' + qs('toll', brg), { svc: 'routing', timeout: o.timeout || 45000, tries: 1, allowBody: true }); if (j && j.code === 'Ok') { json = j; avoidApplied = true; } } catch (e) { /* server may not support exclude */ }
         }
-        if (!json) json = await getJSON(base + path + '?' + qs(''), { svc: 'routing', timeout: 45000, allowBody: true });
+        if (!json && brg) {
+          try { const j = await getJSON(base + path + '?' + qs('', brg), { svc: 'routing', timeout: o.timeout || 45000, tries: 1, allowBody: true }); if (j && j.code === 'Ok') json = j; } catch (e) { /* no road that way within reach: ask again without the direction */ }
+        }
+        if (!json) json = await getJSON(base + path + '?' + qs(''), { svc: 'routing', timeout: o.timeout || 45000, allowBody: true });
         if (json.code !== 'Ok') { const e = new Error(json.code === 'NoRoute' ? 'No drivable route between those places' : (json.message || json.code)); e.fatal = true; throw e; }
         break;
       } catch (e) { lastErr = e; json = null; if (e.fatal) break; }
@@ -138,6 +143,7 @@
   I.applyPlan = async function (plan, route) {
     MP.store.set('plan', plan);
     await I.storeRoute(plan, route);
+    if (I.reroute) Object.assign(I.reroute, { state: 'idle', fails: 0, count: 0, err: null, original: null, lastTry: 0 });   // a newly chosen plan is its own original
     MP.engine.setRoute(route, plan);
     I.loadAlong(route, { force: true });
     return route;
@@ -158,6 +164,62 @@
     })();
     return refreshing;
   };
+
+  /* --------------------------------------------------------------- re-routing */
+  /* When the car leaves the planned road the plan is fetched again from where the car is now: real roads to the via
+   * points still ahead, then the destination. Nothing is stored — the saved plan keeps the route it was planned with,
+   * and that original comes back when the drive ends. */
+  const RR = (I.reroute = { busy: false, state: 'idle', lastTry: 0, fails: 0, count: 0, err: null, original: null });
+  /** the plan's via points the car has not reached yet (the current route's inner waypoints are always the plan's last ones) */
+  I.viasAhead = function (plan, route, along) {
+    const via = (plan && plan.via) || [], mid = route && route.waypoints ? route.waypoints.slice(1, -1) : [];
+    const n = Math.min(via.length, mid.filter((w) => w.d > along + 30).length);
+    return n ? via.slice(via.length - n) : [];
+  };
+  I.rerouteFromHere = async function () {
+    const plan = S.plan, g = S.gps;
+    if (!plan || !plan.to) throw new Error('No destination set');
+    if (g.lat == null) throw new Error('No GPS position yet');
+    if (RR.busy) return null;
+    RR.busy = true; RR.state = 'fetching'; RR.lastTry = Date.now(); RR.err = null; emit('reroute', 'start');
+    try {
+      const old = S.route;
+      const pts = [{ lat: g.lat, lng: g.lng, name: plan.from ? plan.from.name : '' }].concat(I.viasAhead(plan, old, S.d.along || 0), [plan.to]);
+      const rs = await I.fetchRoutes(pts, { avoidTolls: plan.avoidTolls, bearing: (g.speed || 0) > 3 ? g.heading : null, timeout: 25000 });
+      if (S.plan !== plan || !S.trip) { RR.state = 'idle'; return null; }      // the trip was changed or ended while we waited
+      const route = rs[0];
+      if (!RR.original && old) RR.original = old;
+      RR.count++; RR.fails = 0; RR.state = 'ok';
+      MP.engine.setRoute(route, plan);
+      emit('reroute', 'ok', route);
+      // what lies along the new road (hills, weather, stops, stories): shortly, once the new route has settled
+      const key = I.routeKey(route);
+      setTimeout(() => { if (S.route && I.routeKey(S.route) === key) I.loadAlong(S.route); }, 9000);
+      return route;
+    } catch (e) {
+      RR.fails++; RR.state = 'failed'; RR.err = e && e.message || String(e); emit('reroute', 'fail', RR.err);
+      throw e;
+    } finally { RR.busy = false; }
+  };
+  /** 1 Hz: off the planned road for a while → fetch a new one (12 s apart, backing off to 2 min while the service is unreachable) */
+  I.autoReroute = function (d, now) {
+    if (!S.trip || !S.route || !S.plan || !d.offRoute || d.arrived || RR.busy) return false;
+    if (root.navigator && root.navigator.onLine === false) return false;
+    if ((now || Date.now()) - RR.lastTry < Math.min(120000, 12000 * Math.pow(2, RR.fails))) return false;
+    I.rerouteFromHere().catch(() => {});
+    return true;
+  };
+  /** the drive is over: the plan gets back the route it was planned with */
+  I.endReroutes = function () {
+    const orig = RR.original;
+    Object.assign(RR, { state: 'idle', fails: 0, count: 0, err: null, original: null, lastTry: 0 });
+    if (orig && S.plan && S.route !== orig) { MP.engine.setRoute(orig, S.plan); I.loadAlong(orig); }
+  };
+  if (MP.bus) {
+    MP.bus.on('tick', (d) => I.autoReroute(d, d.now));
+    MP.bus.on('trip', (k) => { if (k === 'end') I.endReroutes(); else if (k === 'start') Object.assign(RR, { state: 'idle', fails: 0, count: 0, err: null, original: null, lastTry: 0 }); });
+    MP.bus.on('route', (r) => { if (!r) Object.assign(RR, { state: 'idle', fails: 0, count: 0, err: null, original: null, lastTry: 0 }); });
+  }
 
   /* ---------------------------------------------------------------- geocoding */
   I.parseNominatim = (arr) => (arr || []).map((r) => ({

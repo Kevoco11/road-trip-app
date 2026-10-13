@@ -156,7 +156,13 @@
       S.intel.errors && Object.keys(S.intel.errors).length ? h('p.muted.small', { style: { marginTop: '8px' } }, 'Some data is missing: ' + Object.entries(S.intel.errors).map(([k, v]) => k + ' (' + v + ')').join(', ') + '. Trippin\' retries automatically when the connection is back.') : null,
       h('div.row', { style: { gap: '8px', marginTop: '14px', flexWrap: 'wrap' } },
         h('button.btn.small', { onclick: () => { I.retryFailed(); ui.toast('Retrying…', 'info', 1500); } }, 'Reload data'),
-        h('button.btn.small', { onclick: async () => { try { ui.toast('Re-fetching roads…', 'info', 1800); await MP.kv.del('route:' + p.id); await I.refreshRoute(); } catch (e) { ui.toast(e.message, 'error', 4500); } } }, 'Re-route'),
+        h('button.btn.small', { onclick: async () => {
+          try {
+            ui.toast('Re-fetching roads…', 'info', 1800);
+            if (S.trip && S.gps.lat != null) await I.rerouteFromHere();    // mid-drive: from where the car is, not from the planned start
+            else { await MP.kv.del('route:' + p.id); await I.refreshRoute(); }
+          } catch (e) { ui.toast(e.message, 'error', 4500); }
+        } }, 'Re-route'),
         h('button.btn.small.ghost', { onclick: () => { editing = true; draft = { from: p.from, to: p.to, via: (p.via || []).slice(), departMs: p.departMs, avoidTolls: !!p.avoidTolls }; T.renderPlan(); } }, 'Change trip'),
         h('button.btn.small.danger', { onclick: clearTrip }, 'Clear')),
       h('div.row', { style: { gap: '8px', marginTop: '12px' } }, h('button.btn.primary.grow', { onclick: () => MP.go('drive') }, icon('drive'), 'Go to Drive'), h('button.btn.grow', { onclick: () => MP.go('ahead') }, icon('ahead'), 'See the road')));

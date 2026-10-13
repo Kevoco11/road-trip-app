@@ -128,6 +128,12 @@
     MP.bus.on('prefs', () => { D.rebuildF(true); D.renderVoice(); });
     MP.bus.on('theme', () => { D.recolor(); D.renderTheme(); });
     MP.bus.on('tick', D.update);
+    MP.bus.on('arrive', (to) => { ui.toast('Arrived' + (to && to.name ? ' — ' + to.name.split(',')[0] : ''), 'ok', 5000); D.update(S.d); });
+    MP.bus.on('beyond', () => { ui.toast('Past your destination — carrying on as a free drive', 'info', 4500); D.update(S.d); D.layout(); });
+    MP.bus.on('reroute', (st, x) => {
+      if (st === 'ok' && x) { ui.toast('New route · ' + units.dist(x.total) + ' ' + units.distUnit() + ' to go', 'ok', 4000); if (MP.voice) MP.voice.say('New route.', { key: 'reroute', cooldownMs: 15000 }); }
+      D.update(S.d);
+    });
     D.renderVoice(); D.renderGo(); D.recolor(); D.renderTheme();
     if (S.route) { mv.setRoute(S.route); rebuildMarkers(); }
     D.layout();
@@ -219,12 +225,18 @@
   }
   function sceneState() {
     const r = S.route, d = S.d, hy = D.vis ? D.vis.hy : 220;
-    if (!r) {   // free drive: no road geometry is known, so the windshield shows a straight road along your GPS heading
+    // No planned road under the car: a free drive, a car that has left its route, or one that drove on past its
+    // destination. The route position would be a place the car is not (that was the "frozen road"), so the windshield
+    // draws the real mapped street the car is on instead, with its real surroundings (freeroad.js).
+    const offPlan = !!r && !!S.trip && preview == null && !!d.street;
+    if (!r || offPlan) {
       const pos = S.gps.lat != null ? S.gps : MP.store.get('lastpos', null) || { lat: 39.8, lng: -98.6 };
-      // …unless the map knows the street you are on: then the real road ahead is drawn, with its real surroundings (freeroad.js)
       const fr = S.trip && S.prefs.scenery !== false && MP.freeroad ? MP.freeroad.update(S.gps, d) : null;
-      if (fr) return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: fr.along + coast(fr.route.total - fr.along), route: fr.route, speed: d.speedMps || 0, wx: null, elevAt: null, signs: [], hy, live: true };
-      return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: 0, route: null, speed: d.speedMps || 0, wx: null, elevAt: null, signs: [], hy };
+      const wx = r && MP.wxAt ? MP.wxAt(d.along || 0, d.now || Date.now()) : null;   // the forecast for this stretch still applies a street away
+      if (fr) return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: fr.along + coast(fr.route.total - fr.along), route: fr.route, speed: d.speedMps || 0, wx, elevAt: null, signs: [], hy, live: true };
+      // the map does not know this street: a straight road along the GPS heading (no geometry is invented) — except for
+      // a car merely beside its route (a driveway, a car park at the start), which keeps the planned road in view
+      if (!r || d.beyond || d.offRoute) return { ms: Date.now(), lat: pos.lat, lng: pos.lng, heading: d.heading || 0, along: 0, route: null, speed: d.speedMps || 0, wx, elevAt: null, signs: [], hy };
     }
     let ms, along, speed = 0;
     if (preview != null && F) { const f = F.at(preview); ms = f.ms; along = f.along; speed = f.moving ? 28 : 0; }
@@ -329,21 +341,25 @@
   const C_RED = '#ff5a4f', C_AMB = '#ffb020', C_GRN = '#3ddc97';
   function boardMessage(d) {
     const msgs = [];
+    if (d.arrived && !d.beyond) msgs.push(['ARRIVED' + (S.plan && S.plan.to ? ' - ' + S.plan.to.name.split(',')[0] : ''), C_GRN, false]);
     if (d.sun && d.sun.glare > 0.45) msgs.push(['SUN GLARE AHEAD - VISOR DOWN', C_AMB, true]);
-    if (d.offRoute) msgs.push(['OFF ROUTE - RECALCULATING', C_RED, true]);
+    if (d.offRoute) {   // say what is really happening: a new route is being fetched, or it cannot be right now
+      const rr = MP.intel.reroute, offline = root.navigator && root.navigator.onLine === false;
+      msgs.push([offline ? 'OFF ROUTE - NO SIGNAL FOR A NEW ROUTE' : rr.state === 'failed' ? 'OFF ROUTE - ROUTE SERVICE NOT ANSWERING - RETRYING' : 'OFF ROUTE - FINDING A NEW ROUTE', C_RED, true]);
+    }
     if (d.alert && d.alert.level === 'break') msgs.push(['TAKE A BREAK NOW - 20 MIN NAP', C_RED, true]);
     if (rec && rec.need) {
       const where = rec.poi ? ' - ' + rec.poi.name.toUpperCase() + ' ' + units.distLabel(Math.max(0, rec.poi.d - (d.along || 0))).toUpperCase() : '';
       msgs.push([rec.title.toUpperCase() + where, rec.urgent ? C_RED : C_AMB, rec.urgent]);
     }
-    if (!msgs.length && S.route) msgs.push([S.trip ? 'ALL CLEAR - DRIVE SAFE' : 'READY - ARRIVE ' + fmt.clock(d.etaMs || Date.now()).toUpperCase(), C_GRN, false]);
+    if (!msgs.length && S.route && !d.beyond) msgs.push([S.trip ? 'ALL CLEAR - DRIVE SAFE' : 'READY - ARRIVE ' + fmt.clock(d.etaMs || Date.now()).toUpperCase(), C_GRN, false]);
     if (!msgs.length) msgs.push([S.trip ? 'FREE DRIVE - DRIVE SAFE' : 'NO TRIP SET - PRESS START FOR A FREE DRIVE', S.trip ? C_GRN : C_AMB, false]);
     return msgs[0];
   }
 
   D.update = function (d) {
     if (!el || !mv) return;
-    const r = S.route;
+    const r = d.beyond ? null : S.route;   // driven on past the destination: the cockpit reads as a free drive
     D.rebuildF(false);
     ui.setText(nodes.speed, units.speed(d.speedMps)); ui.setText(nodes.speedU, units.speedUnit());
     nodes.speedo.classList.toggle('over', d.limit != null && units.speed(d.speedMps) > d.limit + 5);
@@ -361,8 +377,8 @@
       man.classList.toggle('approach', d.stepDistM != null && d.stepDistM < 350);
     }
     nodes.empty.hidden = !!(r || S.trip);
-    nodes.pit.hidden = !F;
-    ui.setText(nodes.etaK, r ? 'Arrive' : 'Drive time'); ui.setText(nodes.lGo, r ? 'To go' : 'Driven');
+    nodes.pit.hidden = !F || !r;
+    ui.setText(nodes.etaK, !r ? 'Drive time' : d.arrived ? 'Arrived' : 'Arrive'); ui.setText(nodes.lGo, r ? 'To go' : 'Driven');
     if (!r) {
       const es = S.trip ? (d.elapsedSec || 0) : 0, hh = Math.floor(es / 3600), mm = Math.floor((es % 3600) / 60);
       ui.flap(nodes.eta, hh + ':' + util.pad2(mm)); ui.setText(nodes.etaAp, 'H:MM');

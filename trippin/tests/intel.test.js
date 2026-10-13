@@ -284,6 +284,94 @@ t('plan basics', () => {
   eq(I.routeSig(p), '1.0000,2.0000|3.0000,4.0000:0');
 });
 
+group('arriving, driving on, leaving the route (the windshield must never stay pinned to a place the car has left)');
+const fixAt = (p, ts, o) => E.onFix(Object.assign({ lat: p.lat, lng: p.lng, acc: 5, speed: 12, heading: p.bearing || 0, alt: null, ts }, o || {}));
+function freshDrive() {
+  if (S.trip) E.endTrip();
+  E.clearRoute();
+  const r = asRoute(); S.plan = MP.plan.blank({ name: 'A', lat: 41.66, lng: -83.55 }, { name: 'B', lat: 41.55, lng: -83.62 });
+  E.setRoute(r, S.plan); E.startTrip(1e12);
+  return r;
+}
+t('reaching the end of the route is an arrival; driving on past it becomes a free drive, not a frozen road', () => {
+  const r = freshDrive(); let ts = 1e12, arrived = 0, beyond = 0;
+  const o1 = MP.bus.on('arrive', () => arrived++), o2 = MP.bus.on('beyond', () => beyond++);
+  for (let a = r.total - 400; a <= r.total; a += 12) fixAt(r.pointAt(a), ts += 1000);
+  ok(S.d.arrived, 'arrived'); eq(arrived, 1); eq(S.d.beyond, false); eq(S.d.street, false); eq(S.d.along, r.total);
+  // keep going straight on for 400 m past the destination
+  const end = r.pointAt(r.total), brg = r.bearingAhead(r.total - 80);
+  for (let m = 12; m <= 400; m += 12) { const p = MP.geo.destination(end.lat, end.lng, brg, m); fixAt({ lat: p.lat, lng: p.lng, bearing: brg }, ts += 1000); }
+  eq(S.d.beyond, true, 'beyond the destination'); eq(beyond, 1); eq(S.d.street, true, 'windshield follows the real street');
+  E.tick(ts); eq(S.d.offRoute, false, 'an arrived trip is not "off route"');
+  eq(arrived, 1, 'arrival is announced once');
+  o1(); o2(); E.endTrip(); eq(S.d.arrived, null); eq(S.d.street, false);
+});
+t('parking a little way from the route end is still just "arrived"', () => {
+  const r = freshDrive(); let ts = 1e12;
+  for (let a = r.total - 200; a <= r.total; a += 10) fixAt(r.pointAt(a), ts += 1000);
+  const end = r.pointAt(r.total), p = MP.geo.destination(end.lat, end.lng, 90, 60);
+  for (let k = 0; k < 20; k++) fixAt({ lat: p.lat, lng: p.lng }, ts += 1000, { speed: 0 });
+  ok(S.d.arrived); eq(S.d.beyond, false); E.endTrip();
+});
+t('leaving the planned road: street view after a moment, "off route" after 8 s; one bad fix does neither', () => {
+  const r = freshDrive(); let ts = 1e12;
+  const at = (a, offM) => { const p = r.pointAt(a), q = MP.geo.destination(p.lat, p.lng, p.bearing + 90, offM); return { lat: q.lat, lng: q.lng, bearing: p.bearing }; };
+  for (let a = 2000; a < 2100; a += 12) fixAt(r.pointAt(a), ts += 1000);
+  eq(S.d.street, false);
+  fixAt(at(2110, 90), ts += 1000); eq(S.d.street, false, 'a single stray fix'); fixAt(r.pointAt(2125), ts += 1000); eq(S.d.street, false);
+  for (let k = 0; k < 4; k++) fixAt(at(2140, 160 + k * 12), ts += 1000);
+  eq(S.d.street, true, 'off the planned road'); eq(S.d.offRoute, false, 'not yet');
+  for (let k = 0; k < 8; k++) fixAt(at(2140, 210 + k * 12), ts += 1000);
+  eq(S.d.offRoute, true);
+  for (let a = 2200; a < 2260; a += 12) fixAt(r.pointAt(a), ts += 1000);
+  eq(S.d.street, false, 'back on the route'); eq(S.d.offRoute, false); E.endTrip();
+});
+t('a new route mid-drive starts from where the car is on it (old progress used to stay pinned)', () => {
+  const r = freshDrive(); let ts = Date.now();
+  for (let a = 9000; a < 9100; a += 12) fixAt(r.pointAt(a), ts += 1000);
+  near(S.d.along, 9096, 15);
+  const r2 = asRoute();                                  // same road as a different Route object = a re-route
+  const p = r2.pointAt(1500); fixAt(p, ts += 1000);      // the car is 1.5 km into it
+  E.setRoute(r2, S.plan);
+  near(S.d.along, 1500, 5, 'snapped onto the new route at once'); eq(S.d.arrived, null);
+  fixAt(r2.pointAt(1512), ts += 1000); near(S.d.along, 1512, 5, 'and keeps advancing');
+  E.tick(Date.now() + 1000); ok(Math.abs(S.d.deltaSec) < 30, 'schedule delta restarts with the new route, got ' + S.d.deltaSec);
+  E.setRoute(r2, S.plan); near(S.d.along, 1512, 5, 're-snapping the stops of the same route keeps the progress');
+  E.endTrip();
+});
+t('via points already passed are left out of a re-route; those ahead are kept', () => {
+  const r = asRoute(), plan = { via: [{ name: 'v1', lat: 1, lng: 1 }, { name: 'v2', lat: 2, lng: 2 }] };
+  r.waypoints = [{ d: 0 }, { d: 4000 }, { d: 9000 }, { d: r.total }];
+  eq(I.viasAhead(plan, r, 100).map((v) => v.name).join(), 'v1,v2'); eq(I.viasAhead(plan, r, 5000).map((v) => v.name).join(), 'v2'); eq(I.viasAhead(plan, r, 9500).length, 0);
+  r.waypoints = [{ d: 0 }, { d: 6000 }, { d: r.total }];   // already re-routed once: only v2 is on the current route
+  eq(I.viasAhead(plan, r, 100).map((v) => v.name).join(), 'v2');
+});
+t('off route → a new route is fetched from the car (heading sent), applied, and the original returns when the drive ends', async () => {
+  const r = freshDrive(); let ts = Date.now();
+  const log = []; I.fetchImpl = fakeFetch([['/route/v1/driving/', () => ({ json: J('osrm-short.json') })]], log);
+  const p0 = r.pointAt(3000), q = MP.geo.destination(p0.lat, p0.lng, p0.bearing + 90, 300);
+  for (let k = 0; k < 12; k++) fixAt({ lat: q.lat, lng: q.lng, bearing: 123 }, ts += 1000);
+  E.tick(ts); eq(S.d.offRoute, true);
+  await new Promise((res) => setTimeout(res, 20));
+  eq(log.length, 1, 'one routing request'); ok(log[0].includes(q.lng.toFixed(6) + ',' + q.lat.toFixed(6) + ';'), 'starts at the car: ' + log[0]); ok(/bearings=123,60;/.test(log[0]), 'heading sent');
+  ok(S.route !== r, 'new route applied'); eq(I.reroute.count, 1); eq(I.reroute.state, 'ok'); eq(S.d.offRoute, false);
+  eq(I.autoReroute(S.d, Date.now()), false, 'not asked again while on the new road');
+  E.endTrip(); ok(S.route === r, 'the planned route is back'); eq(I.reroute.count, 0);
+  I.fetchImpl = null;
+});
+t('re-route: when the service is unreachable it backs off, says so, and nothing is invented', async () => {
+  const r = freshDrive(); let ts = Date.now();
+  const log = []; I.fetchImpl = fakeFetch([['/route/v1/driving/', () => ({ throws: 'offline' })]], log);
+  const p0 = r.pointAt(3000), q = MP.geo.destination(p0.lat, p0.lng, p0.bearing + 90, 300);
+  for (let k = 0; k < 12; k++) fixAt({ lat: q.lat, lng: q.lng }, ts += 1000);
+  E.tick(ts); await new Promise((res) => setTimeout(res, 400));
+  eq(I.reroute.state, 'failed'); ok(S.route === r, 'still the planned route'); eq(I.reroute.fails, 1);
+  const n = log.length; eq(I.autoReroute(S.d, Date.now()), false, 'waits before trying again'); eq(log.length, n);
+  eq(I.autoReroute(S.d, Date.now() + 30000), true, 'tries again later');
+  await new Promise((res) => setTimeout(res, 400));
+  E.endTrip(); I.fetchImpl = null;
+});
+
 (async () => {
   let pass = 0, fail = 0;
   for (const [name, fn] of tests) {

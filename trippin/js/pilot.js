@@ -72,8 +72,8 @@
     });
 
     // off route / arrival
-    if (d.offRoute) add({ id: 'offroute', kind: 'route', level: 'warn', title: 'Off route', text: 'You are about ' + mi(d.off || 0) + ' from the planned route.', speak: 'Off route.', cooldown: 3 * 60000 });
-    if (r && d.remaining != null && d.remaining < 450 && t.distM > 1500) add({ id: 'arrive', kind: 'route', level: 'good', title: 'You have arrived', text: S.plan ? S.plan.to.name : 'Destination', speak: 'You have arrived.', cooldown: 6 * 3600000 });
+    if (d.offRoute) add({ id: 'offroute', kind: 'route', level: 'warn', title: 'Off route', text: 'You are about ' + mi(d.off || 0) + ' from the planned route. Finding a new route from where you are.', speak: 'Off route. Finding a new route.', cooldown: 3 * 60000 });
+    if (r && d.arrived) add({ id: 'arrive', kind: 'route', level: 'good', title: 'You have arrived', text: S.plan ? S.plan.to.name : 'Destination', speak: 'You have arrived.', cooldown: 6 * 3600000 });
 
     // roadside stories as you pass them
     if (S.prefs.alerts.stories) {

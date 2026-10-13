@@ -41,6 +41,8 @@
   const E = (MP.engine = { S });
   let pace = new MP.PaceTracker();
   let prevFix = null, headingAnchor = null, hint = null, offSince = 0, slowSince = 0, fastSince = 0, lastCrumb = 0, lastAltFilt = null;
+  let awaySince = 0, beyondSince = 0;
+  const ARRIVE_M = 45, ARRIVE_OFF_M = 70, BEYOND_M = 140;
   let driveFatigueSec = 0;
 
   /* ---- prefs -------------------------------------------------------------- */
@@ -61,9 +63,18 @@
 
   /* ---- route / plan ------------------------------------------------------- */
   E.setRoute = function (route, plan) {
+    const same = route === S.route;                    // same road, only the plan's stops changed
     S.route = route; if (plan) S.plan = plan;
     hint = null;
-    pace = new MP.PaceTracker();
+    if (!same) {
+      pace = new MP.PaceTracker();
+      // Progress belongs to one route. A new one (a re-route, a changed trip) starts from where the car is on *it*:
+      // carrying the old distance over pinned the windshield to a spot the car was no longer at.
+      resetProgress();
+      const g = S.gps;
+      if (S.trip && g.lat != null) { const sn = route.snap(g.lat, g.lng); hint = sn.idx; Object.assign(S.d, { snap: sn, off: sn.off, along: sn.along }); S.trip.leg = { at: Date.now(), along0: sn.along }; }
+      else if (S.trip) S.trip.leg = null;
+    }
     // snap planned stops onto the route
     if (S.plan && S.plan.stops) S.plan.stops.forEach((st) => { const sn = route.snap(st.lat, st.lng); st.along = sn.along; st.off = sn.off; });
     if (S.plan && S.plan.stops) S.plan.stops.sort((a, b) => a.along - b.along);
@@ -72,10 +83,14 @@
   };
 
   /** forget the planned trip (back to "no destination"): the app still works as a free drive */
+  function resetProgress() {
+    offSince = 0; awaySince = 0; beyondSince = 0;
+    Object.assign(S.d, { along: 0, snap: null, off: 0, offRoute: false, arrived: null, beyond: false, street: false });
+  }
   E.clearRoute = function () {
     S.route = null; S.plan = null; hint = null; pace = new MP.PaceTracker();
     Object.assign(S.intel, { elev: null, pois: [], poisAll: [], stories: [], alerts: [], weather: null, wxFn: null, key: null });
-    Object.assign(S.d, { along: 0, snap: null, off: 0, offRoute: false });
+    resetProgress();
     E.tick(Date.now());
     bus.emit('route', null);
   };
@@ -90,6 +105,7 @@
       distM: 0, movingSec: 0, maxMps: 0, climbM: 0, nightM: 0, harsh: { brake: 0, accel: 0 }, fuelL: 0, fuelDistM: 0, speedSum: 0,
     };
     driveFatigueSec = 0; pace = new MP.PaceTracker(); slowSince = 0; fastSince = 0; lastCrumb = 0;
+    offSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
     E.logEvent('start', { lat: S.gps.lat, lng: S.gps.lng });
     bus.emit('trip', 'start');
     E.tick(now);
@@ -102,6 +118,7 @@
     t.endedAt = now;
     E.logEvent('end', { lat: S.gps.lat, lng: S.gps.lng });
     S.trip = null;
+    offSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
     bus.emit('trip', 'end', t);
     return t;
   };
@@ -150,7 +167,8 @@
       // never let the progress jump backwards by more than GPS noise unless clearly re-routed
       S.d.along = (!S.trip || sn.along >= prevAlong - 120 || sn.off > 400) ? sn.along : prevAlong;
       if (sn.off > 120) { if (!offSince) offSince = fix.ts; } else offSince = 0;
-      S.d.offRoute = !!offSince && fix.ts - offSince > 8000;
+      if (S.trip) trackRoute(S.route, sn, fix, speed);
+      S.d.offRoute = !S.d.arrived && !!offSince && fix.ts - offSince > 8000;
     }
 
     const t = S.trip;
@@ -197,6 +215,34 @@
     prevFix = { lat: fix.lat, lng: fix.lng, ts: fix.ts, speedForAccel: speed };
     bus.emit('gps', g);
   };
+
+  /**
+   * Where the car is relative to the plan, beyond plain progress:
+   *   d.arrived  time the car reached the end of the route (stays set for the rest of the drive)
+   *   d.beyond   the car has driven on past the destination — the drive carries on as a free drive
+   *   d.street   the car is not on the planned road right now, so the windshield must draw the street it is
+   *              actually on instead of a route position it has left (see drive.js / freeroad.js)
+   */
+  function trackRoute(r, sn, fix, speed) {
+    const d = S.d, t = S.trip;
+    if (!t.leg) t.leg = { at: fix.ts, along0: sn.along };
+    if (!d.arrived && r.total - sn.along < ARRIVE_M && sn.off < ARRIVE_OFF_M) {
+      d.arrived = fix.ts;
+      E.logEvent('arrive', { lat: fix.lat, lng: fix.lng });
+      bus.emit('arrive', S.plan && S.plan.to);
+    }
+    if (d.arrived) d.along = r.total;                       // the trip is done: progress stays at 100 %
+    if (d.arrived && !d.beyond) {
+      const n = r.pts.length, far = geo.haversine(fix.lat, fix.lng, r.pts[n - 2], r.pts[n - 1]) > BEYOND_M;
+      if (far && speed > 2) { if (!beyondSince) beyondSince = fix.ts; if (fix.ts - beyondSince >= 4000) { d.beyond = true; E.logEvent('beyond', { lat: fix.lat, lng: fix.lng }); bus.emit('beyond'); } }
+      else if (!far) beyondSince = 0;
+    }
+    // on the planned road? (GPS error scales the tolerance; a short grace period rides out one bad fix)
+    const lim = Math.max(38, Math.min(70, (fix.acc || 0) * 1.5));
+    if (d.beyond) d.street = true;
+    else if (sn.off > lim) { if (!awaySince) awaySince = fix.ts; if (fix.ts - awaySince >= 2500) d.street = true; }
+    else if (sn.off < lim * 0.7) { awaySince = 0; d.street = false; }
+  }
 
   E._closeStop = function (now) {
     const st = S.d.stopped; if (!st) return;
@@ -303,10 +349,13 @@
       const base = t ? now : E.plannedDepartMs();
       const e = MP.eta.compute(r, along, base, d.pace, stopSec);
       d.etaMs = e.arriveMs; d.driveSec = e.driveSec; d.stopSec = stopSec;
+      if (t && d.arrived) { d.etaMs = d.arrived; d.driveSec = 0; }   // there: the clock shows when you actually arrived
       if (t) {
-        // delta versus the plan: what the planned clock says we should have used so far
-        const plannedElapsed = r.timeAt(along) + (S.plan && S.plan.stops || []).filter((st) => st.along <= along).reduce((a, st) => a + (st.minutes || p.avgStopMin) * 60, 0);
-        d.deltaSec = plannedElapsed - (now - t.startedAt) / 1000;   // + = ahead of plan
+        // delta versus the plan, measured over this leg (from where the drive joined this route — after a re-route the
+        // old road's distance means nothing): what the planned clock says the stretch driven should have taken
+        const leg = t.leg || { at: t.startedAt, along0: 0 };
+        const plannedElapsed = r.timeAt(along) - r.timeAt(leg.along0) + (S.plan && S.plan.stops || []).filter((st) => st.along > leg.along0 && st.along <= along).reduce((a, st) => a + (st.minutes || p.avgStopMin) * 60, 0);
+        d.deltaSec = plannedElapsed - (now - leg.at) / 1000;   // + = ahead of plan
         d.elapsedSec = (now - t.startedAt) / 1000;
       } else { d.deltaSec = null; d.elapsedSec = 0; }
       d.nextStep = r.nextStep(along);
