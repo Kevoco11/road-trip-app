@@ -284,6 +284,17 @@ t('plan basics', () => {
   eq(I.routeSig(p), '1.0000,2.0000|3.0000,4.0000:0');
 });
 
+group('vehicle');
+t('VIN decode: only the first 11 characters are sent; the real NHTSA reply parses; the answer is cached', async () => {
+  const log = []; I.fetchImpl = fakeFetch([['vpic.nhtsa.dot.gov', () => ({ json: J('vpic-1G1JC5444R7.json') })]], log);
+  const v = await I.decodeVin('1G1JC5444R7252367');
+  eq(v.make, 'Chevrolet'); eq(v.model, 'Cavalier'); eq(v.year, 1994); eq(v.dispL, 2.2); eq(v.cyl, 4); eq(v.fuel, null, 'NHTSA has no fuel type for this one → unknown, not guessed');
+  ok(log[0].includes('/DecodeVinValues/1G1JC5444R7?'), log[0]); ok(!log[0].includes('252367'), 'the serial number stays on the phone');
+  await I.decodeVin('1G1JC5444R7999999'); eq(log.length, 1, 'same car line → cache');
+  eq(await I.decodeVin('short'), null); eq(I.parseVpic({ Results: [{ Make: '', ModelYear: '' }] }), null);
+  I.fetchImpl = null;
+});
+
 group('arriving, driving on, leaving the route (the windshield must never stay pinned to a place the car has left)');
 const fixAt = (p, ts, o) => E.onFix(Object.assign({ lat: p.lat, lng: p.lng, acc: 5, speed: 12, heading: p.bearing || 0, alt: null, ts }, o || {}));
 function freshDrive() {

@@ -24,6 +24,8 @@
     avgStopMin: 12, wakeHour: 6.0, hudMode: 'reflectV', lens: 'plain', keepAwake: true, scenery: true,
     alerts: { break: true, fuel: true, weather: true, glare: true, toll: true, engine: true, speed: false, stories: false },
     geminiKey: '', geminiModel: 'gemini-2.5-flash', vehicleName: '',
+    deck: null,        // the Car gauge deck: [{k: reading, s: 'S'|'M'|'L'}] (null = the standard eight)
+    obdAuto: true,     // connect to the adapter used last time whenever it comes into range
   };
 
   const S = (MP.S = {
@@ -31,7 +33,7 @@
     plan: null, route: null,
     trip: null,
     gps: { lat: null, lng: null, acc: null, speed: 0, heading: null, alt: null, ts: 0, lock: false, fixes: 0 },
-    car: { connected: false, data: {}, seen: {}, fuelLph: null, fuelSrc: null, dtcs: [], mil: null },
+    car: { connected: false, data: {}, seen: {}, every: {}, fuelLph: null, fuelSrc: null, dtcs: [], mil: null },
     fuel: { manual: null },          // {gal, atMs, atDistM} last known fuel from the user (or full tank)
     selfCheck: null,                 // {kss, at}
     intel: { weather: null, pois: [], elev: null, sunFor: null },
@@ -264,7 +266,11 @@
   E.onObd = function (vals, now) {
     now = now || Date.now();
     const c = S.car;
-    for (const k in vals) { c.data[k] = vals[k]; c.seen[k] = now; }
+    for (const k in vals) {
+      // how often this value really arrives (slow ones come every 10–20 s): a reading is only "gone" after a few missed turns
+      const prev = c.seen[k]; if (prev && now > prev) c.every[k] = c.every[k] ? c.every[k] * 0.6 + (now - prev) * 0.4 : now - prev;
+      c.data[k] = vals[k]; c.seen[k] = now;
+    }
     // instantaneous fuel flow (L/h) + trip integration
     const fl = MP.obdFuel ? MP.obdFuel(c.data, S.prefs) : null;
     if (fl) {
@@ -278,10 +284,10 @@
     }
     bus.emit('obd', c);
   };
-  /** value if seen in the last `maxAgeMs`, else null */
+  /** value if seen in the last `maxAgeMs` (default: 6 s, or three of its own polling intervals if that is longer), else null */
   E.car = function (key, maxAgeMs) {
     const c = S.car, t = c.seen[key];
-    return t && Date.now() - t < (maxAgeMs || 6000) ? c.data[key] : null;
+    return t && Date.now() - t < (maxAgeMs || Math.max(6000, Math.min(90000, 3 * (c.every[key] || 0)))) ? c.data[key] : null;
   };
 
   /* ---- fuel --------------------------------------------------------------- */

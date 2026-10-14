@@ -12,6 +12,11 @@
       this.spaces = true; this.ecuOn = opts.ecuOn !== false; this.latency = opts.latency != null ? opts.latency : 1;
       this.supported = opts.supported || [0x04, 0x05, 0x0b, 0x0c, 0x0d, 0x0f, 0x10, 0x11, 0x2f, 0x33, 0x42, 0x5c, 0x1f];
       this.v = Object.assign({ rpm: 2100, speed: 105, load: 38, coolant: 92, map: 62, iat: 31, maf: 14.6, throttle: 24, fuel: 61, baro: 98, volt: 14.1, oil: 99, run: 1830 }, opts.values || {});
+      this.fast = !!opts.fast;            // a genuine ELM327 accepts a reply-count digit after the request ("010C1"); many clones answer "?"
+      this.freeze = opts.freeze || null;  // { dtc: 'P0301', values: { rpm, speed, … } } → mode 02 freeze frame
+      this.ecuName = opts.ecuName || 'ECM-EngineControl'; this.calId = opts.calId || 'JMB*36761500';
+      this.swallow = 0;                   // test hook: the next N requests get no reply at all (a lost BLE packet)
+      this.delayNext = 0;                 // test hook: the next reply arrives this many ms late (after the app's timeout)
       this.dtcs = opts.dtcs || ['P0133', 'P0300'];
       this.pending = opts.pending || [];
       this.vin = opts.vin || '1G1JC5444R7252367';
@@ -24,11 +29,14 @@
     drop() { this.connected = false; this.closeCb('emulated link loss'); }
     async write(str) {
       const cmd = String(str).replace(/[\r\n]/g, '').trim().toUpperCase(); this.log.push(cmd);
+      if (!this.connected) return;
+      if (this.swallow > 0) { this.swallow--; return; }
       const out = this._reply(cmd);
       const chunks = out.match(/[\s\S]{1,20}/g) || [];
       let i = 0;
       const pump = () => { if (i < chunks.length) { this.dataCb(chunks[i++]); setTimeout(pump, this.latency); } };
-      setTimeout(pump, this.latency);
+      const wait = this.delayNext || this.latency; this.delayNext = 0;
+      setTimeout(pump, wait);
     }
     _fmt(bytes) { return this.spaces ? bytes.map((b) => hex(b)).join(' ') : bytes.map((b) => hex(b)).join(''); }
     _reply(cmd) {
@@ -58,6 +66,19 @@
         const frames = [all.slice(0, 6)]; for (let i = 6; i < all.length; i += 7) frames.push(all.slice(i, i + 7));
         return '014\r' + frames.map((f, i) => i.toString(16).toUpperCase() + ': ' + this._fmt(f)).join('\r') + '\r\r>';
       }
+      if (/^09(04|0A)$/.test(cmd)) {
+        const pid = parseInt(cmd.slice(2), 16), txt = pid === 4 ? this.calId : this.ecuName; if (!txt) return 'NO DATA\r\r>';
+        const all = [0x49, pid, 0x01].concat(Array.from(txt.padEnd(pid === 4 ? 16 : 20, '\0')).map((c) => c.charCodeAt(0)));
+        const frames = [all.slice(0, 6)]; for (let i = 6; i < all.length; i += 7) frames.push(all.slice(i, i + 7));
+        return all.length.toString(16).toUpperCase().padStart(3, '0') + '\r' + frames.map((f, i) => i.toString(16).toUpperCase() + ': ' + this._fmt(f)).join('\r') + '\r\r>';
+      }
+      if (/^02[0-9A-F]{2}00$/.test(cmd)) {   // freeze frame 0
+        const pid = parseInt(cmd.slice(2, 4), 16), fz = this.freeze; if (!fz) return 'NO DATA\r\r>';
+        if (pid === 0x02) { const c = fz.dtc, L = 'PCBU'.indexOf(c[0]), n = parseInt(c.slice(2), 16); return this._fmt([0x42, 0x02, 0x00, (L << 6) | (parseInt(c[1], 10) << 4) | (n >> 8), n & 255]) + '\r\r>'; }
+        const b = this._pidBytes(pid, Object.assign({}, this.v, fz.values)); if (!b) return 'NO DATA\r\r>';
+        return this._fmt([0x42, pid, 0x00].concat(b)) + '\r\r>';
+      }
+      if (this.fast && /^01[0-9A-F]{2}[1-9]$/.test(cmd)) cmd = cmd.slice(0, 4);
       if (/^01[0-9A-F]{2}$/.test(cmd)) {
         const pid = parseInt(cmd.slice(2), 16), v = this.v;
         if (pid % 0x20 === 0) { // supported-PID bitmaps
@@ -67,8 +88,30 @@
         }
         if (pid === 0x01) return this._fmt([0x41, 0x01, this.dtcs.length ? 0x80 | this.dtcs.length : 0, 0x07, 0x65, 0x00]) + '\r\r>';
         if (!this.supported.includes(pid)) return 'NO DATA\r\r>';
+        const b = this._pidBytes(pid, v); if (!b) return 'NO DATA\r\r>';
+        return this._fmt([0x41, pid].concat(b)) + '\r\r>';
+      }
+      return '?\r\r>';
+    }
+    /** the data bytes a car would send for a mode-01/02 PID, from the emulated values */
+    _pidBytes(pid, v) {
         let b;
+        const w = (x) => [(x >> 8) & 255, x & 255], trim = (p) => [Math.round(p * 128 / 100) + 128];
         switch (pid) {
+          case 0x03: b = [v.fuelSys != null ? v.fuelSys : 2, 0]; break;
+          case 0x06: b = trim(v.stft != null ? v.stft : 3.1); break;
+          case 0x07: b = trim(v.ltft != null ? v.ltft : -4.7); break;
+          case 0x0e: b = [Math.round(((v.timing != null ? v.timing : 12) + 64) * 2)]; break;
+          case 0x14: b = [Math.round((v.o2 != null ? v.o2 : 0.72) * 200), 0x80]; break;
+          case 0x1c: b = [v.obdStd || 1]; break;
+          case 0x21: b = w(v.milKm || 0); break;
+          case 0x31: b = w(v.clrKm != null ? v.clrKm : 1234); break;
+          case 0x44: b = w(Math.round((v.lambdaCmd || 1) * 32768)); break;
+          case 0x49: b = [Math.round((v.pedal != null ? v.pedal : 18) * 255 / 100)]; break;
+          case 0x51: b = [v.fuelType || 1]; break;
+          case 0x62: b = [(v.torque != null ? v.torque : 40) + 125]; break;
+          case 0x63: b = w(v.refTorque || 320); break;
+          case 0xa6: { const x = Math.round((v.odo != null ? v.odo : 123456.7) * 10); b = [(x >>> 24) & 255, (x >>> 16) & 255, (x >>> 8) & 255, x & 255]; break; }
           case 0x04: b = [Math.round(v.load * 255 / 100)]; break;
           case 0x05: b = [v.coolant + 40]; break;
           case 0x0b: b = [v.map]; break;
@@ -84,11 +127,9 @@
           case 0x5c: b = [v.oil + 40]; break;
           case 0x5e: { const x = Math.round((v.fuelRate || 6.2) * 20); b = [x >> 8, x & 255]; break; }
           case 0x8e: b = [(v.friction || 14) + 125]; break;
-          default: return 'NO DATA\r\r>';
+          default: return null;
         }
-        return this._fmt([0x41, pid].concat(b)) + '\r\r>';
-      }
-      return '?\r\r>';
+        return b;
     }
   }
   root.ElmEmulator = ElmEmulator;

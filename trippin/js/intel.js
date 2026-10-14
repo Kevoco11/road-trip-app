@@ -260,6 +260,30 @@
     } catch (e) { return 'My location'; }
   };
 
+  /* ------------------------------------------------------------------ vehicle */
+  /** NHTSA vPIC reply → { make, model, year, dispL, cyl, fuel, body } (missing fields are null: NHTSA does not know them) */
+  I.parseVpic = function (json) {
+    const r = json && json.Results && json.Results[0]; if (!r) return null;
+    const s = (v) => { v = String(v == null ? '' : v).trim(); return v && !/^not applicable$/i.test(v) ? v : null; };
+    const n = (v) => { const x = parseFloat(v); return isFinite(x) && x > 0 ? x : null; };
+    const title = (v) => (v ? v.toLowerCase().replace(/(^|[\s-])([a-z])/g, (m, a, b) => a + b.toUpperCase()) : null);
+    const out = { make: title(s(r.Make)), model: s(r.Model), year: n(r.ModelYear), dispL: n(r.DisplacementL), cyl: n(r.EngineCylinders), fuel: s(r.FuelTypePrimary), body: s(r.BodyClass) };
+    if (out.dispL) out.dispL = Math.round(out.dispL * 10) / 10;
+    return out.make || out.year ? out : null;
+  };
+  /**
+   * What the car is, from its VIN, via the US NHTSA's public decoder. Only the first 11 characters are sent (maker,
+   * model, engine, year, plant) — the last six are the car's serial number and never leave the phone. Cached for good.
+   */
+  I.decodeVin = async function (vin) {
+    if (!vin || vin.length !== 17) return null;
+    const key = vin.slice(0, 11), hit = MP.store.get('vin:' + key, null);
+    if (hit) return hit;
+    const v = I.parseVpic(await getJSON('https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/' + encodeURIComponent(key) + '?format=json', { svc: 'vehicle', tries: 2, timeout: 15000 }));
+    if (v) MP.store.set('vin:' + key, v);
+    return v;
+  };
+
   /* ------------------------------------------------------------------ weather */
   const WX_VARS = 'weather_code,temperature_2m,precipitation,cloud_cover,wind_gusts_10m,visibility';
   const num = (v, d) => (v == null || !isFinite(v) ? d : v);

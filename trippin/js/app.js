@@ -99,6 +99,9 @@
     const resumed = await E.restoreTrip();
     if (resumed) { MP.gps.start(); MP.drive.setFollow(true); ui.toast('Resumed your trip in progress', 'ok'); MP.bus.emit('trip', 'resume'); }
 
+    // the adapter used last time: Android connects to it by itself as soon as it is in range (car on, adapter plugged in)
+    if (S.prefs.obdAuto !== false && MP.obd && MP.obd.autoConnect) MP.obd.autoConnect();
+
     E.tick(Date.now());
     autoTheme();
     setInterval(() => { E.tick(Date.now()); autoTheme(); }, 1000);

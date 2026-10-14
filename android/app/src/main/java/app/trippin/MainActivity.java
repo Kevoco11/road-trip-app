@@ -273,24 +273,43 @@ public class MainActivity extends Activity {
         }
 
         /* ------------------------------------------------------------ BLE */
+        private final java.util.HashMap<String, Long> seenAt = new java.util.HashMap<>();
+
+        /** false only when Bluetooth is known to be switched off */
+        @JavascriptInterface public boolean bleOn() {
+            try { BluetoothAdapter a = adapter(); return a != null && a.isEnabled(); } catch (Exception e) { return true; }
+        }
+
         @JavascriptInterface public void bleScan(final int ms) {
             ui.post(() -> withBlePerms(() -> startScan(ms)));
         }
         private void startScan(int ms) {
             BluetoothAdapter a = adapter();
-            if (a == null || !a.isEnabled()) { js("MPN.onBleState('error','Turn Bluetooth on first')"); js("MPN.onScanDone()"); return; }
+            if (a == null || !a.isEnabled() || a.getBluetoothLeScanner() == null) { js("MPN.onBleState('error','Turn Bluetooth on first')"); js("MPN.onScanDone()"); return; }
             stopScan();
-            scanCb = new ScanCallback() {
+            seenAt.clear();
+            final ScanCallback mine = new ScanCallback() {
                 @Override public void onScanResult(int type, ScanResult r) {
                     BluetoothDevice d = r.getDevice();
+                    // Android reports the same device several times a second; pass each one on at once the first time, then at most every 1.5 s
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    Long last = seenAt.get(d.getAddress());
+                    if (last != null && now - last < 1500) return;
+                    seenAt.put(d.getAddress(), now);
                     String name = r.getScanRecord() != null ? r.getScanRecord().getDeviceName() : null;
                     if (name == null) { try { name = d.getName(); } catch (SecurityException ignored) { } }
                     js("MPN.onScanResult(" + q(d.getAddress()) + "," + q(name) + "," + r.getRssi() + ")");
                 }
+                @Override public void onScanFailed(int code) {
+                    scanning = false;
+                    js("MPN.onBleState('error','Bluetooth scan could not start (code " + code + ")')"); js("MPN.onScanDone()");
+                }
             };
-            scanning = true;
-            a.getBluetoothLeScanner().startScan(scanCb);
-            ui.postDelayed(() -> { if (scanning) { stopScan(); js("MPN.onScanDone()"); } }, Math.max(2000, ms));
+            scanCb = mine; scanning = true;
+            try {
+                a.getBluetoothLeScanner().startScan(null, new android.bluetooth.le.ScanSettings.Builder().setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY).build(), mine);
+            } catch (Exception e) { scanning = false; js("MPN.onBleState('error','Bluetooth scan could not start')"); js("MPN.onScanDone()"); return; }
+            ui.postDelayed(() -> { if (scanning && scanCb == mine) { stopScan(); js("MPN.onScanDone()"); } }, Math.max(2000, ms));
         }
         private void stopScan() {
             BluetoothAdapter a = adapter();
@@ -299,61 +318,150 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public void bleStopScan() { ui.post(this::stopScan); }
 
+        /* The link. `wantLink` is what the page asked for; everything below runs on the main thread. */
+        private String linkId;
+        private boolean wantLink = false, linkUp = false, autoMode = false, writing = false;
+        private int attempt = 0, reopens = 0, writeToken = 0, writeRetry = 0;
+        private final java.util.ArrayDeque<byte[]> writeQ = new java.util.ArrayDeque<>();
+
         @JavascriptInterface public void bleConnect(final String id) {
+            ui.post(() -> withBlePerms(() -> { attempt = 0; reopens = 0; open(id, false); }));
+        }
+        /** connect whenever the adapter comes into range: Android waits for it in the background, with no time limit */
+        @JavascriptInterface public void bleConnectAuto(final String id) {
+            ui.post(() -> withBlePerms(() -> { attempt = 0; reopens = 0; open(id, true); }));
+        }
+        /** after a lost link: bring the same adapter back as soon as it can be reached again */
+        @JavascriptInterface public void bleReconnect(final String id) {
             ui.post(() -> withBlePerms(() -> {
-                stopScan();
-                BluetoothAdapter a = adapter();
-                if (a == null) { js("MPN.onBleState('error','No Bluetooth')"); return; }
-                if (gatt != null) { try { gatt.close(); } catch (Exception ignored) { } gatt = null; }
-                BluetoothDevice dev = a.getRemoteDevice(id);
-                gatt = Build.VERSION.SDK_INT >= 23 ? dev.connectGatt(MainActivity.this, false, cb, BluetoothDevice.TRANSPORT_LE) : dev.connectGatt(MainActivity.this, false, cb);
+                wantLink = true;
+                // first ask the existing link to come back; if that has not worked by the next call, start again from scratch
+                if (gatt != null && id.equals(linkId) && reopens++ == 0) { try { if (gatt.connect()) return; } catch (Exception ignored) { } }
+                open(id, true);
             }));
+        }
+        private void open(String id, boolean auto) {
+            stopScan();
+            BluetoothAdapter a = adapter();
+            if (a == null || !a.isEnabled()) { js("MPN.onBleState('error','Turn Bluetooth on first')"); return; }
+            closeLink();
+            linkId = id; wantLink = true; linkUp = false; autoMode = auto;
+            try {
+                gatt = a.getRemoteDevice(id).connectGatt(MainActivity.this, auto, cb, BluetoothDevice.TRANSPORT_LE);
+            } catch (Exception e) { js("MPN.onBleState('error'," + q("Could not open the adapter: " + e.getMessage()) + ")"); }
+        }
+        private void closeLink() {
+            if (gatt != null) { try { gatt.disconnect(); gatt.close(); } catch (Exception ignored) { } }
+            gatt = null; rx = null; tx = null; writeQ.clear(); writing = false; linkUp = false;
         }
 
         @JavascriptInterface public void bleWrite(String text) {
-            if (gatt == null || tx == null) return;
-            byte[] data = text.getBytes(StandardCharsets.ISO_8859_1);
-            for (int i = 0; i < data.length; i += 20) {
-                byte[] part = java.util.Arrays.copyOfRange(data, i, Math.min(data.length, i + 20));
+            final byte[] data = text.getBytes(StandardCharsets.ISO_8859_1);
+            ui.post(() -> {
+                if (gatt == null || tx == null) return;
+                for (int i = 0; i < data.length; i += 20) writeQ.add(java.util.Arrays.copyOfRange(data, i, Math.min(data.length, i + 20)));
+                pump();
+            });
+        }
+        /** One write at a time. Android drops a write that is started while the previous one is still in flight, and a
+         *  dropped request means a reply that never comes; so the next chunk goes out only when the last is confirmed. */
+        private void pump() {
+            if (writing || gatt == null || tx == null) return;
+            final byte[] part = writeQ.peek();
+            if (part == null) return;
+            boolean ok = false;
+            try {
                 tx.setValue(part);
                 tx.setWriteType((tx.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-                gatt.writeCharacteristic(tx);
-                try { Thread.sleep(12); } catch (InterruptedException ignored) { }
-            }
+                ok = gatt.writeCharacteristic(tx);
+            } catch (Exception ignored) { }
+            if (ok) {
+                writeQ.poll(); writing = true; writeRetry = 0;
+                final int token = ++writeToken;
+                ui.postDelayed(() -> { if (writing && token == writeToken) { writing = false; pump(); } }, 400);   // in case the confirmation never arrives
+            } else if (++writeRetry <= 25) {
+                ui.postDelayed(this::pump, 20);                                                                     // the stack was busy: try again shortly
+            } else { writeRetry = 0; writeQ.clear(); }
         }
 
         @JavascriptInterface public void bleDisconnect() {
-            ui.post(() -> { if (gatt != null) { try { gatt.disconnect(); gatt.close(); } catch (Exception ignored) { } gatt = null; rx = null; tx = null; } });
+            ui.post(() -> { wantLink = false; linkId = null; closeLink(); });
+        }
+
+        private boolean isUart(UUID u) {
+            String s = u.toString().toLowerCase(Locale.US);
+            return s.startsWith("0000fff0-") || s.startsWith("0000ffe0-") || s.startsWith("000018f0-")
+                    || s.equals("6e400001-b5a3-f393-e0a9-e50e24dcca9e") || s.equals("e7810a71-73ae-499d-8c15-faa9aef0c3f2") || s.equals("49535343-fe7d-4ae5-8fa9-9fafd205e455");
+        }
+        private void linkIsUp() {
+            if (linkUp) return;
+            linkUp = true; attempt = 0; reopens = 0;
+            js("MPN.onBleState('connected','')");
         }
 
         private final BluetoothGattCallback cb = new BluetoothGattCallback() {
-            @Override public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
-                if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-                    ui.postDelayed(g::discoverServices, 600);
-                } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
-                    js("MPN.onBleState('closed','Adapter disconnected')");
-                }
-            }
-            @Override public void onServicesDiscovered(BluetoothGatt g, int status) {
-                BluetoothGattCharacteristic n = null, w = null;
-                for (BluetoothGattService s : g.getServices()) {
-                    BluetoothGattCharacteristic sn = null, sw = null;
-                    for (BluetoothGattCharacteristic c : s.getCharacteristics()) {
-                        int p = c.getProperties();
-                        if (sn == null && (p & (BluetoothGattCharacteristic.PROPERTY_NOTIFY | BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0) sn = c;
-                        if (sw == null && (p & (BluetoothGattCharacteristic.PROPERTY_WRITE | BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) != 0) sw = c;
+            @Override public void onConnectionStateChange(final BluetoothGatt g, final int status, final int newState) {
+                ui.post(() -> {
+                    if (g != gatt) { try { g.close(); } catch (Exception ignored) { } return; }   // an old link reporting in
+                    if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+                        try { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH); } catch (Exception ignored) { }
+                        ui.postDelayed(() -> { if (g == gatt) { try { g.discoverServices(); } catch (Exception ignored) { } } }, 600);
+                    } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
+                        final boolean was = linkUp;
+                        rx = null; tx = null; writeQ.clear(); writing = false; linkUp = false;
+                        if (!wantLink) return;
+                        // A first connection that fails outright (Android's status 133) usually succeeds when simply tried again
+                        if (!was && !autoMode && status != BluetoothGatt.GATT_SUCCESS && attempt < 2) {
+                            attempt++;
+                            final String id = linkId;
+                            ui.postDelayed(() -> { if (wantLink && id != null && id.equals(linkId)) open(id, false); }, 500);
+                            return;
+                        }
+                        js("MPN.onBleState('closed'," + q(was ? "Adapter disconnected" : "Could not reach the adapter. Is it plugged in, with the ignition on?") + ")");
                     }
-                    if (sn != null && sw != null) { n = sn; w = sw; break; }
-                }
-                if (n == null) { js("MPN.onBleState('error','No UART service on this device — is it a BLE adapter?')"); return; }
-                rx = n; tx = w;
-                g.setCharacteristicNotification(rx, true);
-                BluetoothGattDescriptor d = rx.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
-                if (d == null) { js("MPN.onBleState('connected','')"); return; }
-                d.setValue((rx.getProperties() & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE : BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
-                g.writeDescriptor(d);
+                });
             }
-            @Override public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d, int status) { js("MPN.onBleState('connected','')"); }
+            @Override public void onServicesDiscovered(final BluetoothGatt g, int status) {
+                ui.post(() -> {
+                    if (g != gatt) return;
+                    BluetoothGattCharacteristic n = null, w = null;
+                    // the adapter's serial service first (FFF0 / FFE0 / 18F0 / Nordic / ISSC UART), then any service that can both notify and be written
+                    for (int pass = 0; pass < 2 && n == null; pass++) {
+                        for (BluetoothGattService s : g.getServices()) {
+                            if (pass == 0 && !isUart(s.getUuid())) continue;
+                            BluetoothGattCharacteristic sn = null, sw = null;
+                            for (BluetoothGattCharacteristic c : s.getCharacteristics()) {
+                                int p = c.getProperties();
+                                if (sn == null && (p & (BluetoothGattCharacteristic.PROPERTY_NOTIFY | BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0) sn = c;
+                                if (sw == null && (p & (BluetoothGattCharacteristic.PROPERTY_WRITE | BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) != 0) sw = c;
+                            }
+                            if (sn != null && sw != null) { n = sn; w = sw; break; }
+                        }
+                    }
+                    if (n == null) { js("MPN.onBleState('error','No UART service on this device — is it a BLE OBD adapter?')"); return; }
+                    rx = n; tx = w;
+                    g.setCharacteristicNotification(rx, true);
+                    BluetoothGattDescriptor d = rx.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
+                    if (d == null) { linkIsUp(); return; }
+                    boolean sent = false;
+                    try {
+                        d.setValue((rx.getProperties() & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE : BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
+                        sent = g.writeDescriptor(d);
+                    } catch (Exception ignored) { }
+                    if (!sent) linkIsUp();
+                    else ui.postDelayed(() -> { if (g == gatt) linkIsUp(); }, 1500);   // some stacks never confirm the descriptor write
+                });
+            }
+            @Override public void onDescriptorWrite(final BluetoothGatt g, BluetoothGattDescriptor d, int status) {
+                ui.post(() -> { if (g == gatt) linkIsUp(); });
+            }
+            @Override public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int status) {
+                ui.post(() -> { writing = false; pump(); });
+            }
+            // Android 13+ hands the bytes over directly; older versions leave them on the characteristic
+            @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c, byte[] v) {
+                if (v != null) js("MPN.onBleData(" + q(new String(v, StandardCharsets.ISO_8859_1)) + ")");
+            }
             @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
                 byte[] v = c.getValue();
                 if (v != null) js("MPN.onBleData(" + q(new String(v, StandardCharsets.ISO_8859_1)) + ")");
