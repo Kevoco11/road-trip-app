@@ -97,6 +97,8 @@
       // time each option from what your own drives say about these roads at this hour (where there are any), then put the
       // fastest first. Options are only compared on the same basis: a measured time is never ranked against a free-flow guess.
       if (MP.learn) options.forEach((r) => MP.learn.apply(r, draft.departMs));
+      if (MP.traffic && MP.traffic.enabled()) await Promise.all(options.map((r) => MP.traffic.apply(r, { departMs: draft.departMs }).catch(() => null)));
+      if (options.some((r) => r.traffic)) options.sort((a, b) => ((a.traffic ? 0 : 1) - (b.traffic ? 0 : 1)) || a.duration - b.duration);
       if (options.some((r) => r.learned && r.learned.coverage >= 0.5)) options.sort((a, b) => ((a.learned && a.learned.coverage >= 0.5 ? 0 : 1) - (b.learned && b.learned.coverage >= 0.5 ? 0 : 1)) || a.duration - b.duration);
       optIdx = 0; renderOptions();
       if (draft.avoidTolls && !options[0].avoidTollsApplied) ui.toast('The routing service could not avoid tolls; showing the best route it found.', 'warn', 5000);
@@ -112,7 +114,7 @@
         return h('button.ropt' + (i === optIdx ? '.on' : ''), { onclick: () => { optIdx = i; renderOptions(); } },
           h('div.ro-top', h('b', i === 0 ? 'Fastest' : 'Alternative ' + i), h('span.num', mi(r.total))),
           h('div.ro-mid', h('span', fmt.dur(r.duration) + ' driving'), d.tollM > 1500 ? h('span.toll', (d.tollInferred ? 'Likely toll: ' : 'Toll: ') + mi(d.tollM)) : null),
-          h('div.ro-via', (MP.learn ? MP.learn.basis(r).text : 'free-flow time, no traffic information') + (r.learned ? ' (free-flow: ' + fmt.dur(r.freeDuration) + ')' : '')),
+          h('div.ro-via', (r.traffic ? MP.traffic.basis(r).text : MP.learn ? MP.learn.basis(r).text : 'free-flow time, no traffic information') + (r.learned ? ' (free-flow: ' + fmt.dur(r.freeDuration) + ')' : '')),
           h('div.ro-via', d.via.length ? 'via ' + d.via.join(' · ') : 'local roads'));
       }),
       h('button.btn.primary.big', { onclick: usePlan }, icon('check'), 'Use this route'));
@@ -289,6 +291,8 @@
       h('div.row', { style: { gap: '8px', margin: '12px 0 0', flexWrap: 'wrap', alignItems: 'center' } },
         h('button.btn.small', { onclick: async () => { const r = await MP.diag.share(); ui.toast(r === 'copied' ? 'Report copied to the clipboard' : r === 'shared' ? 'Report ready to send' : r === 'failed' ? 'Could not share the report' : 'Cancelled', r === 'failed' ? 'error' : 'ok'); } }, icon('share'), 'Share report'),
         h('span.muted.small', MP.diag.errors.length ? MP.diag.errors.length + ' error' + (MP.diag.errors.length === 1 ? '' : 's') + ' logged since launch' : 'No errors logged since launch')),
+      h('details.gem', h('summary.k', 'Live traffic with TomTom (optional)'), h('p.muted.small', 'Add your own free TomTom API key and the planner and the ETA use live congestion on your route, rechecked every 5 minutes while you drive. The key stays on this phone.'),
+        h('label.field', h('span.k', 'TomTom key'), h('input', { type: 'password', placeholder: 'API key', value: S.prefs.tomtomKey || '', onchange: (e) => E.setPref('tomtomKey', e.target.value.trim()) }))),
       h('details.gem', h('summary.k', 'Voice questions with Gemini (optional)'), h('p.muted.small', 'Typed and spoken questions about your trip work without this. If you add your own Google Gemini API key, anything else you ask is answered by Gemini. The key stays on this phone.'),
         h('label.field', h('span.k', 'API key'), h('input', { type: 'password', placeholder: 'AIza…', value: S.prefs.geminiKey || '', onchange: (e) => E.setPref('geminiKey', e.target.value.trim()) })),
         h('label.field', h('span.k', 'Model'), h('input', { type: 'text', value: S.prefs.geminiModel || 'gemini-2.5-flash', onchange: (e) => E.setPref('geminiModel', e.target.value.trim() || 'gemini-2.5-flash') }))),

@@ -23,7 +23,7 @@
     tankGal: 14, mpg: 28, reserveGal: 1.0, fuelType: 'gasoline', dispL: null, fuelPrice: 3.45,
     avgStopMin: 12, wakeHour: 6.0, hudMode: 'reflectV', lens: 'plain', keepAwake: true, scenery: true,
     alerts: { break: true, fuel: true, weather: true, glare: true, toll: true, engine: true, speed: false, stories: false },
-    geminiKey: '', geminiModel: 'gemini-2.5-flash', vehicleName: '',
+    geminiKey: '', tomtomKey: '', geminiModel: 'gemini-2.5-flash', vehicleName: '',
     deck: null,        // the Car gauge deck: [{k: reading, s: 'S'|'M'|'L'}] (null = the standard eight)
     obdAuto: true,     // connect to the adapter used last time whenever it comes into range
     lead: 0.4,         // seconds the windshield is drawn ahead of the newest GPS fix (the fix describes where the car WAS)
@@ -70,6 +70,8 @@
     S.route = route; if (plan) S.plan = plan;
     // the time this route takes: what the driver's own past drives say about these roads at this hour, else free-flow
     if (MP.learn && route && !route.approx) MP.learn.apply(route, S.trip ? Date.now() : E.plannedDepartMs());
+    // live congestion (optional TomTom key) replaces the history time map when it arrives
+    if (MP.traffic && MP.traffic.enabled() && route && !route.approx) MP.traffic.apply(route, { departMs: S.trip ? Date.now() : E.plannedDepartMs() }).then((t) => { if (t && S.route === route) E.tick(); }).catch(() => {});
     hint = null;
     if (!same) {
       pace = new MP.PaceTracker();

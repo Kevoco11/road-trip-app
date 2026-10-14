@@ -667,6 +667,7 @@
       I.retryFailed();
       const w = S.intel.weather;
       if (S.trip && w && Date.now() - w.fetchedAt > 30 * 60000) I.refreshWeather();
+      if (S.trip && S.route && MP.traffic && MP.traffic.enabled() && Date.now() - ((S.route.traffic && S.route.traffic.at) || 0) > 5 * 60000) MP.traffic.apply(S.route, {}).then((t) => { if (t && MP.engine) MP.engine.tick(); }).catch(() => {});
       if (S.trip && (!S.intel.alertsAt || Date.now() - S.intel.alertsAt > 8 * 60000)) I.refreshAlerts(true);
     }, 150000);
     if (root.addEventListener) root.addEventListener('online', () => { I.retryFailed(); if (S.trip) { I.refreshWeather(); I.refreshAlerts(true); } });

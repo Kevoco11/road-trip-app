@@ -7,7 +7,7 @@ const path = require('path'), fs = require('fs');
 const { eq, near, MP } = require('./unit.js');
 const J = (f) => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8'));
 const L = (f) => require(path.join(__dirname, '../js', f));
-L('native.js'); L('ui.js'); const E = L('engine.js'); L('plan.js'); const I = L('intel.js'); const LEARN = L('learn.js'); const V = L('voice.js'); const P = L('pilot.js'); const R = L('recap.js');
+L('native.js'); L('ui.js'); const E = L('engine.js'); L('plan.js'); const I = L('intel.js'); const LEARN = L('learn.js'); const TRAF = L('traffic.js'); const V = L('voice.js'); const P = L('pilot.js'); const R = L('recap.js');
 const S = MP.S;
 
 const tests = [];
@@ -449,6 +449,20 @@ t('drives already saved on the phone are learned from once, at start-up', async 
   ok(await LEARN.backfill() >= 1); ok(LEARN.profiles.some((p) => p.id === 'old1'), 'the saved drive was learned'); eq(await LEARN.backfill(), 0, 'not again');
   const r = stRoute(); ok(LEARN.apply(r, WED_7_20), 'a drive from last Wednesday counts');
   LEARN.profiles = [];
+});
+
+t('live traffic: TomTom delays are added to the stretches they belong to, nothing happens without a key', async () => {
+  const r = stRoute(), free = r.duration; E.S.prefs.tomtomKey = '';
+  eq(await TRAF.apply(r, {}), null, 'no key, no change'); eq(r.duration, free);
+  E.S.prefs.tomtomKey = 'k';
+  const a = r.pointAt(1000), b = r.pointAt(1500), keep = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ routes: [{ summary: { travelTimeInSeconds: 1, noTrafficTravelTimeInSeconds: 1 }, legs: [{ points: [{ latitude: a.lat, longitude: a.lng }, { latitude: b.lat, longitude: b.lng }] }], sections: [{ sectionType: 'TRAFFIC', startPointIndex: 0, endPointIndex: 1, delayInSeconds: 240, simpleCategory: 'JAM' }] }] }) });
+  const res = await TRAF.apply(r, {}); globalThis.fetch = keep; E.S.prefs.tomtomKey = '';
+  ok(res && Math.abs(res.delay - 240) < 1, JSON.stringify(res && res.delay));
+  near(r.duration, free + 240, 2, 'duration is free-flow plus the delay');
+  ok(r.timeAt(1500) - r.timeAt(1000) > 200, 'the delay sits on that stretch');
+  eq(MP.traffic.basis(r).kind, 'live');
+  LEARN.apply(r, WED_7_20); eq(r.traffic, null, 're-applying history clears the live flag');
 });
 
 (async () => {

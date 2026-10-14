@@ -145,6 +145,7 @@
   /** give `route` the time map measured from your drives (and say so), or its free-flow one again when nothing matches */
   L.apply = function (route, ms) {
     if (!route || !route.setTimeline) return null;
+    route.traffic = null;
     const p = L.predict(route, ms);
     if (!p) { route.clearTimeline(); return null; }
     route.setTimeline(p.slices, STEP);
