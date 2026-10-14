@@ -94,6 +94,10 @@
     try {
       const pts = [draft.from].concat(draft.via, [draft.to]);
       options = await I.fetchRoutes(pts, { avoidTolls: draft.avoidTolls, alternatives: draft.via.length === 0 });
+      // time each option from what your own drives say about these roads at this hour (where there are any), then put the
+      // fastest first. Options are only compared on the same basis: a measured time is never ranked against a free-flow guess.
+      if (MP.learn) options.forEach((r) => MP.learn.apply(r, draft.departMs));
+      if (options.some((r) => r.learned && r.learned.coverage >= 0.5)) options.sort((a, b) => ((a.learned && a.learned.coverage >= 0.5 ? 0 : 1) - (b.learned && b.learned.coverage >= 0.5 ? 0 : 1)) || a.duration - b.duration);
       optIdx = 0; renderOptions();
       if (draft.avoidTolls && !options[0].avoidTollsApplied) ui.toast('The routing service could not avoid tolls; showing the best route it found.', 'warn', 5000);
     } catch (e) { nodes.optBox.replaceChildren(h('p.bad-note', e.message)); }
@@ -107,7 +111,8 @@
         const d = I.describeRoute(r);
         return h('button.ropt' + (i === optIdx ? '.on' : ''), { onclick: () => { optIdx = i; renderOptions(); } },
           h('div.ro-top', h('b', i === 0 ? 'Fastest' : 'Alternative ' + i), h('span.num', mi(r.total))),
-          h('div.ro-mid', h('span', fmt.dur(r.duration) + ' driving, no traffic'), d.tollM > 1500 ? h('span.toll', (d.tollInferred ? 'Likely toll: ' : 'Toll: ') + mi(d.tollM)) : null),
+          h('div.ro-mid', h('span', fmt.dur(r.duration) + ' driving'), d.tollM > 1500 ? h('span.toll', (d.tollInferred ? 'Likely toll: ' : 'Toll: ') + mi(d.tollM)) : null),
+          h('div.ro-via', (MP.learn ? MP.learn.basis(r).text : 'free-flow time, no traffic information') + (r.learned ? ' (free-flow: ' + fmt.dur(r.freeDuration) + ')' : '')),
           h('div.ro-via', d.via.length ? 'via ' + d.via.join(' · ') : 'local roads'));
       }),
       h('button.btn.primary.big', { onclick: usePlan }, icon('check'), 'Use this route'));
@@ -120,7 +125,7 @@
     plan.departMs = draft.departMs; plan.avoidTolls = draft.avoidTolls;
     try {
       await I.applyPlan(plan, r);
-      ui.toast('Route ready: ' + mi(r.total) + ', ' + fmt.dur(r.duration), 'ok');
+      ui.toast('Route ready: ' + mi(r.total) + ', ' + fmt.dur(r.duration) + (r.learned ? ' (from your drives)' : ''), 'ok');
       options = null; editing = false; draft = { from: null, to: null, via: [], departMs: 0, avoidTolls: false };
       T.renderPlan();
     } catch (e) { ui.toast('Could not set the route: ' + e.message, 'error', 5000); }
@@ -140,7 +145,7 @@
     const r = S.route, p = S.plan;
     if (!p) return null;
     const d = S.d;
-    const depart = h('input', { type: 'datetime-local', value: dtValue(p.departMs), disabled: !!S.trip, onchange: (e) => { const t = new Date(e.target.value).getTime(); if (isFinite(t)) { p.departMs = t; MP.store.set('plan', p); E.tick(); MP.drive.rebuildF(true); I.refreshWeather(); } } });
+    const depart = h('input', { type: 'datetime-local', value: dtValue(p.departMs), disabled: !!S.trip, onchange: (e) => { const t = new Date(e.target.value).getTime(); if (isFinite(t)) { p.departMs = t; MP.store.set('plan', p); if (MP.learn && S.route) MP.learn.apply(S.route, t); E.tick(); MP.drive.rebuildF(true); I.refreshWeather(); } } });
     const rows = [];
     if (r) rows.push(h('div.fy', h('span.k', 'Distance'), h('b', mi(r.total))), h('div.fy', h('span.k', 'Driving'), h('b', fmt.dur(r.duration / (d.pace || 1)))), h('div.fy', h('span.k', 'Arrive'), h('b', d.etaMs ? fmt.clock(d.etaMs) + (new Date(d.etaMs).toDateString() === new Date().toDateString() ? '' : ' ' + fmt.day(d.etaMs)) : '—')));
     const stops = (p.stops || []).map((s) => h('div.stp', icon(s.kind === 'fuel' ? 'fuel' : s.kind === 'food' ? 'food' : 'rest'), h('div.grow', h('b', s.name), h('span', (s.minutes || S.prefs.avgStopMin) + ' min' + (s.along != null ? ' · mile ' + Math.round(units.distNum(s.along)) : ''))), h('button.pf-del', { 'aria-label': 'Remove', onclick: () => { p.stops = p.stops.filter((x) => x.id !== s.id); saveStops(); } }, icon('x'))));
@@ -290,7 +295,7 @@
       h('div.row', { style: { gap: '8px', marginTop: '12px', flexWrap: 'wrap' } },
         h('button.btn.small.ghost', { onclick: async () => { const ok = await ui.confirmSheet('Clear downloaded data?', 'Removes cached routes, weather, fuel stops and stories. Your settings, drives and checklist stay.', 'Clear'); if (!ok) return; const keys = (await MP.kv.keys()) || []; for (const k of keys) if (/^(route|intel|wx):/.test(k)) await MP.kv.del(k); ui.toast('Cleared. Reloading the trip data…', 'ok'); if (S.route) { I.loadAlong(S.route, { force: true }); } } }, 'Clear downloaded data'),
         h('button.btn.small.danger', { onclick: async () => { const ok = await ui.confirmSheet('Reset Trippin\'?', 'Deletes everything the app saved on this phone: settings, trips, checklist, expenses and caches.', 'Reset', 'danger'); if (!ok) return; await MP.kv.clear(); (MP.store.keys() || []).forEach((k) => MP.store.remove(k)); location.reload(); } }, 'Reset app')),
-      h('p.muted.small.fine', 'Map tiles © Esri, HERE, Garmin, OpenStreetMap contributors · windshield scenery (buildings, woods, water, streets) © OpenStreetMap contributors via OpenFreeMap / OpenMapTiles · roads: OSRM · weather & elevation: Open-Meteo · places: OpenStreetMap via Overpass · stories: Wikipedia · warnings: US National Weather Service. Everything shown is real data from these sources or your own sensors.'));
+      h('p.muted.small.fine', 'Map tiles © Esri, HERE, Garmin, OpenStreetMap contributors · windshield scenery (woods, water, streets) © OpenStreetMap contributors via OpenFreeMap / OpenMapTiles · building footprints © Overture Maps Foundation (Esri Community Maps, OpenStreetMap contributors and others) · roads: OSRM · weather & elevation: Open-Meteo · places: OpenStreetMap via Overpass · stories: Wikipedia · warnings: US National Weather Service. Everything shown is real data from these sources or your own sensors.'));
   }
   async function runCheck() {
     nodes.svcOut.replaceChildren(h('p.muted.small', 'Checking each service…'));
@@ -312,6 +317,8 @@
     el.append(h('section.card', h('div.card-h', h('h3', icon('gear'), 'Display')),
       h('div.fields', h('div.field', h('span.k', 'Units'), seg('units', [['imperial', 'Miles'], ['metric', 'Km']], () => { T.renderPlan(); })), h('div.field', h('span.k', 'Theme'), seg('theme', [['auto', 'Follow sun'], ['atlas', 'Day'], ['night', 'Night']])),
         h('div.field', h('span.k', 'Keep screen on while driving'), seg('keepAwake', [[true, 'On'], [false, 'Off']])),
+        h('div.field', h('span.k', 'Windshield timing'), seg('lead', [[0, 'GPS'], [0.2, '+0.2 s'], [0.4, '+0.4 s'], [0.7, '+0.7 s'], [1, '+1 s']], () => { if (MP.drive && MP.drive.layout) MP.drive.layout(); }),
+          h('small', 'A GPS fix describes where the car was a moment ago. Raise this if junctions pass on the screen after you have driven through them; lower it if they pass before you reach them.')),
         h('div.field', h('span.k', '3D scenery on the windshield'), seg('scenery', [[true, 'On'], [false, 'Off']], () => { if (MP.drive && MP.drive.layout) MP.drive.layout(); }), h('small', 'Real buildings, woods and streets from OpenStreetMap. Turn off if your phone struggles; the road itself stays 3D.')))));
     el.append(nodes.health);
     MP.bus.on('route', () => { if (!el.hidden) T.renderPlan(); });

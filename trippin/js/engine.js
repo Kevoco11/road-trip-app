@@ -26,6 +26,7 @@
     geminiKey: '', geminiModel: 'gemini-2.5-flash', vehicleName: '',
     deck: null,        // the Car gauge deck: [{k: reading, s: 'S'|'M'|'L'}] (null = the standard eight)
     obdAuto: true,     // connect to the adapter used last time whenever it comes into range
+    lead: 0.4,         // seconds the windshield is drawn ahead of the newest GPS fix (the fix describes where the car WAS)
   };
 
   const S = (MP.S = {
@@ -67,6 +68,8 @@
   E.setRoute = function (route, plan) {
     const same = route === S.route;                    // same road, only the plan's stops changed
     S.route = route; if (plan) S.plan = plan;
+    // the time this route takes: what the driver's own past drives say about these roads at this hour, else free-flow
+    if (MP.learn && route && !route.approx) MP.learn.apply(route, S.trip ? Date.now() : E.plannedDepartMs());
     hint = null;
     if (!same) {
       pace = new MP.PaceTracker();
@@ -108,6 +111,7 @@
     };
     driveFatigueSec = 0; pace = new MP.PaceTracker(); slowSince = 0; fastSince = 0; lastCrumb = 0;
     offSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
+    if (MP.learn && S.route && !S.route.approx) MP.learn.apply(S.route, now);   // leaving now, not at the planned time
     E.logEvent('start', { lat: S.gps.lat, lng: S.gps.lng });
     bus.emit('trip', 'start');
     E.tick(now);
@@ -147,6 +151,13 @@
     if (speed == null) speed = 0;
     if (speed < 0.4) speed = 0;
     g.speed = speed;
+    // GPS timing as this phone really delivers it: how old a fix already is on arrival, how often they come, and the car's
+    // acceleration (the windshield extrapolates with it so a braking car stops where physics says, not past the line)
+    const nowMs = Date.now(), age = nowMs - fix.ts;
+    if (age > -2000 && age < 10000) g.age = g.age == null ? age : g.age * 0.85 + age * 0.15;
+    if (p && fix.ts > p.ts && fix.ts - p.ts < 5000) g.gap = g.gap == null ? fix.ts - p.ts : g.gap * 0.85 + (fix.ts - p.ts) * 0.15;
+    if (p && dt > 0.3 && dt < 3) { const a = util.clamp((speed - (p.speedForAccel || 0)) / dt, -8, 4); g.accel = g.accel == null ? a : g.accel * 0.6 + a * 0.4; }
+    else if (!p || dt >= 3) g.accel = 0;
 
     // heading
     if (fix.heading != null && isFinite(fix.heading) && speed > 1.5) { g.heading = fix.heading; headingAnchor = { lat: fix.lat, lng: fix.lng }; }

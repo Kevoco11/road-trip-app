@@ -3,7 +3,7 @@
      nothing here is shipped. Drive it from Playwright: await window.shot({along, h, m, wx, signs}) then screenshot #c. -->
 <style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
 body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block}</style></head><body><canvas id="c"></canvas>
-<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
 <script>
 (async () => {
   const route = MP.Route.fromOSRM(await (await fetch('fixtures/osrm-sterling.json')).json(), ['Start', 'End']);
@@ -11,7 +11,16 @@ body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:blo
   MP.world.fetchImpl = async (url) => url.endsWith('/planet') ? { ok: true, status: 200, json: async () => ({ tiles: ['https://lab/{z}/{x}/{y}.pbf'] }) }
     : /\/4413\/6046\.pbf$/.test(url) ? { ok: true, status: 200, arrayBuffer: async () => tileBuf } : { ok: true, status: 204, arrayBuffer: async () => new ArrayBuffer(0) };
   const streetEls = (await (await fetch('fixtures/overpass-street-14-4413-6046.json')).json()).elements;   // REAL Overpass reply for the same tile
-  MP.street.fetchImpl = async () => streetEls;
+  const wayEls = (await (await fetch('fixtures/overpass-ways-13-2206-3023.json')).json()).elements;      // REAL lanes/maxspeed reply for the same area
+  const qs = new URLSearchParams(location.search);
+  // ?lanes=0 → draw without OpenStreetMap lane counts (class defaults), ?ovt=0 → OpenStreetMap footprints only (Overture is the default)
+  MP.street.fetchImpl = async (q) => (/way\[/.test(q) ? (qs.get('lanes') === '0' ? [] : wayEls) : streetEls);
+  if (qs.get('ovt') === '0') MP.world.cfg.overture.off = true;
+  else {   // REAL Overture tile for 4413/6046 (gzip'd MVT): decompress here, hand it to the loader exactly as the archive reader would
+    const gz = await fetch('fixtures/overture-14-4413-6046.mvt.gz');
+    const bytes = new Uint8Array(await new Response(gz.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+    MP.world.overtureTile = async (x, y) => (x === 4413 && y === 6046 ? bytes : null);
+  }
   const cv = document.getElementById('c'), sc = new MP.Scene(cv);
   const W = 400, H = 760; sc.resize(W, H, 1); cv.style.width = W + 'px'; cv.style.height = H + 'px';
   const elev = (a) => 200 + 9 * Math.sin(a / 700);
@@ -25,7 +34,7 @@ body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:blo
     MP.world.want([p], true); MP.street.want([p], true);
     for (let i = 0; i < 40; i++) {
       sc.render(st(), 0.033);
-      const t = MP.world.tiles.get('4413/6046'); const pending = !o.noWorld && (!t || t.state === 'load');
+      const t = MP.world.tiles.get('4413/6046'); const pending = !o.noWorld && (!t || t.state === 'load' || (qs.get('ovt') !== '0' && t.bs !== 'ok' && t.bs !== 'empty'));
       const gw = MP.glworld, s = gw.states.get(route), need = Math.floor((along + 2400) / MP.terrain.CH) - Math.floor(Math.max(0, along - 91) / MP.terrain.CH) + 1;
       if (!pending && s && !s.job && s.chunks.size >= Math.min(need, 7) && i > 8) break;
       await new Promise((r) => setTimeout(r, 30));

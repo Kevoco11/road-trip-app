@@ -115,28 +115,78 @@
   /* ------------------------------------------------------------------ road cross-sections */
   const HWY = { motorway: 1, trunk: 1 };
   const MINOR = { service: 1, track: 1 }, RANK = { motorway: 6, trunk: 5, primary: 4, secondary: 3, tertiary: 2, minor: 1, residential: 1 }, TAU = Math.PI * 2;
-  /** pavement description for a road class. All offsets are metres from the centre-line, + = right of travel. */
-  function section(cls, oneway, ramp) {
-    const w = (W().ROADW && W().ROADW[cls]) || 7, hw = w / 2, hwy = !!HWY[cls];
-    const multi = oneway || hwy || ramp;
-    const lanes = multi ? Math.max(1, Math.min(4, Math.round(w / 3.6))) : 2;
+  /** lane width (m) by class, so a road's drawn width follows its lane count */
+  const LANE_W = { motorway: 3.65, trunk: 3.6, primary: 3.5, secondary: 3.4, tertiary: 3.3, minor: 3.1, residential: 3.0, service: 2.8, track: 3.0 };
+  /** lanes per direction a one-way carriageway of this class usually has — used only where OpenStreetMap has no lane count */
+  const TYPICAL = { motorway: 2, trunk: 2, primary: 2, secondary: 2 };
+  T.LANE_W = LANE_W;
+
+  /**
+   * pavement description for a road class. All offsets are metres from the centre-line, + = right of travel.
+   * `L` is what OpenStreetMap says about the lanes ({ f lanes our way, b lanes the other way, c shared centre turn lane,
+   * ow one-way carriageway }) or null when it says nothing: then the road gets what its class usually has and `known` is false.
+   * Lane order across the pavement, left to right: opposing lanes (b), the centre turn lane (c), our lanes (f).
+   */
+  function section(cls, oneway, ramp, L) {
+    const hwy = !!HWY[cls], lw = LANE_W[cls] || 3.3, known = !!L;
+    let f, b, c, ow;
+    if (L) { f = L.f; b = L.b; c = L.c; ow = !!L.ow; }
+    else { ow = !!(oneway || hwy || ramp); f = ow ? (ramp ? 1 : TYPICAL[cls] || 1) : 1; b = ow ? 0 : 1; c = 0; }
+    const n = f + b + c, w = n * lw, hw = w / 2;
     const sh = hwy ? [1.2, 3.0] : cls === 'service' || cls === 'track' ? [0.25, 0.25] : [0.45, 0.7];
+    const X = (i) => -hw + i * lw;                       // left edge of the i-th lane across the pavement
     /* Markings follow US practice by class: freeways get edge lines + white lane dashes; primary/secondary get a double
-     * yellow centre line; tertiary a dashed yellow one; residential streets and service roads are unmarked. */
+     * yellow centre line; tertiary a dashed yellow one; residential streets and service roads are unmarked — unless the
+     * road is mapped with 3 or more lanes, which is only built with paint. A centre turn lane has a solid yellow line on the
+     * side of the traffic it is next to and a dashed one on its own side. */
     const lines = [];
-    const marked = hwy || multi || cls === 'primary' || cls === 'secondary' || cls === 'tertiary';
+    const marked = hwy || ow || cls === 'primary' || cls === 'secondary' || cls === 'tertiary' || (known && n >= 3);
     if (marked) {
-      lines.push({ x0: hw - 0.48, x1: hw - 0.32, c: PAL.white });                                             // right edge line
-      lines.push({ x0: -hw + 0.32, x1: -hw + 0.48, c: multi && (hwy || oneway) ? PAL.yellow : PAL.white });  // left edge line
-      if (multi) { for (let i = 1; i < lanes; i++) { const x = -hw + (w * i) / lanes; lines.push({ x0: x - 0.08, x1: x + 0.08, c: PAL.white, dash: [3, 9] }); } }
-      else if (cls === 'tertiary') lines.push({ x0: -0.07, x1: 0.07, c: PAL.yellow, dash: [3, 9] });
-      else lines.push({ x0: -0.22, x1: -0.07, c: PAL.yellow }, { x0: 0.07, x1: 0.22, c: PAL.yellow });
+      lines.push({ x0: hw - 0.48, x1: hw - 0.32, c: PAL.white });                          // right edge line
+      lines.push({ x0: -hw + 0.32, x1: -hw + 0.48, c: ow ? PAL.yellow : PAL.white });      // left edge line
+      for (let i = 1; i < f; i++) { const x = X(b + c + i); lines.push({ x0: x - 0.08, x1: x + 0.08, c: PAL.white, dash: [3, 9] }); }   // between our lanes
+      for (let i = 1; i < b; i++) { const x = X(i); lines.push({ x0: x - 0.08, x1: x + 0.08, c: PAL.white, dash: [3, 9] }); }           // between the other way's
+      if (!ow && c > 0) {
+        const xa = X(b), xb = X(b + c);
+        lines.push({ x0: xa - 0.20, x1: xa - 0.08, c: PAL.yellow }, { x0: xa + 0.08, x1: xa + 0.20, c: PAL.yellow, dash: [3, 9] });
+        lines.push({ x0: xb + 0.08, x1: xb + 0.20, c: PAL.yellow }, { x0: xb - 0.20, x1: xb - 0.08, c: PAL.yellow, dash: [3, 9] });
+      } else if (!ow) {
+        const xd = X(b);
+        if (cls === 'tertiary' && n <= 2) lines.push({ x0: xd - 0.07, x1: xd + 0.07, c: PAL.yellow, dash: [3, 9] });
+        else if (cls === 'primary' || cls === 'secondary' || cls === 'trunk' || cls === 'motorway' || n >= 4 || cls === 'tertiary') lines.push({ x0: xd - 0.22, x1: xd - 0.07, c: PAL.yellow }, { x0: xd + 0.07, x1: xd + 0.22, c: PAL.yellow });
+      }
     }
-    // camera rides the right lane of a two-lane road, the right lane of a 2-lane carriageway, the middle of 3+ lanes
-    const cam = !multi ? hw / 2 : lanes >= 3 ? -hw + (w * (Math.floor(lanes / 2) + 0.5)) / lanes : lanes === 2 ? hw / 2 : 0;
-    return { cls, hw, w, shL: sh[0], shR: sh[1], lines, cam, post: hwy, multi: !!multi, lanes };
+    // the camera rides the right-hand lane of two, the middle of three, and so on (which lane the car is really in is not known)
+    const lx0 = X(b + c), cam = lx0 + (Math.floor(f / 2) + 0.5) * lw;
+    const heads = Array.from({ length: Math.min(3, f) }, (_, i) => lx0 + (i + 0.5) * lw);   // signal heads hang over each of our lanes
+    return { cls, hw, w, shL: sh[0], shR: sh[1], lines, cam, post: hwy, multi: ow, lanes: f, lanesB: b, centre: c, lw, lx0, heads, oppC: b ? -hw + (b * lw) / 2 : -hw * 0.5, known };
   }
   T.section = section;
+
+  /** OSM lane tags of a mapped way → what the pavement looks like for traffic going with (fwd) or against the way's drawing
+   *  direction: { f, b, c, ow, n } or null when the way has no lane count at all */
+  function laneInfo(w, fwd) {
+    if (!w) return null;
+    if (w.lanes == null && w.f == null && w.b == null) return null;
+    if (w.ow !== 0 || w.junction === 'roundabout') {
+      const n = w.lanes != null ? w.lanes : w.f != null ? w.f : w.b;
+      return { f: n, b: 0, c: 0, ow: true, n };
+    }
+    let f = w.f, b = w.b, c = w.bw ? 1 : 0;
+    if (w.lanes != null) {
+      if (f != null && b == null) b = Math.max(0, w.lanes - f - c);
+      else if (b != null && f == null) f = Math.max(0, w.lanes - b - c);
+      else if (f == null && b == null) {
+        // no split given: an odd count on a two-way road is the usual US layout of one shared centre turn lane
+        if (w.lanes === 1) { f = 1; b = 0; c = 0; }
+        else { if (w.lanes % 2 === 1) c = 1; f = Math.floor((w.lanes - c) / 2); b = (w.lanes - c) - f; }
+      }
+    }
+    if (f == null) f = 1; if (b == null) b = 1;
+    if (!fwd) { const t = f; f = b; b = t; }   // the way is drawn the other way round from the way we travel
+    return { f: Math.max(1, f), b, c, ow: false, n: f + b + c };
+  }
+  T.laneInfo = laneInfo;
 
   /** road class guess from the route's own turn steps — used until the tiles for this stretch have loaded */
   const HWY_RE = /\b(turnpike|freeway|expressway|fwy|tpke|thruway)\b|^(I|Interstate)[\s-]?\d/i;
@@ -164,6 +214,43 @@
         if (cosA < 0.8) continue;
         bd = d; best = r;
       }
+    }
+    return best;
+  }
+
+  /** the road the route itself says it is on at distance a: { name, ref, ramp } (the step that contains a) */
+  function stepHint(route, a) {
+    const s = route.steps; if (!s || !s.length) return null;
+    let lo = 0, hi = s.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (s[m].d <= a) lo = m; else hi = m - 1; }
+    const st = s[lo];
+    return { name: String(st.name || '').toLowerCase(), refs: String(st.ref || '').toLowerCase().split(';').map((v) => v.trim()).filter(Boolean), ramp: st.type === 'on ramp' || st.type === 'off ramp' };
+  }
+  /** like matchRoad, for the OpenStreetMap ways with lane tags: also says whether we travel with the way's drawing direction,
+   *  and never picks the other carriageway of a one-way pair (its direction runs against ours). Where several ways lie on the
+   *  same line (a slip lane that runs alongside, the next segment of the same road), the one the route says it is on wins:
+   *  same name or route number, and a ramp only when the route is on a ramp. */
+  function matchWay(ways, x, y, psi, hint) {
+    const fx = Math.sin(psi), fy = Math.cos(psi); let best = null, bs = -1e9;
+    for (const r of ways) {
+      if (x < r.bb[0] - 9 || x > r.bb[2] + 9 || y < r.bb[1] - 9 || y > r.bb[3] + 9) continue;
+      const p = r.pts, w = r.w; let bd = 9, bdot = 0;
+      for (let i = 0; i + 3 < p.length; i += 2) {
+        const ax = p[i], ay = p[i + 1], ex = p[i + 2] - ax, ey = p[i + 3] - ay, l2 = ex * ex + ey * ey; if (l2 < 1e-9) continue;
+        let t = ((x - ax) * ex + (y - ay) * ey) / l2; t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const d = Math.hypot(ax + t * ex - x, ay + t * ey - y); if (d >= bd) continue;
+        const dot = (ex * fx + ey * fy) / Math.sqrt(l2);
+        if (Math.abs(dot) < 0.8) continue;
+        if ((w.ow === 1 && dot < 0) || (w.ow === -1 && dot > 0)) continue;
+        bd = d; bdot = dot;
+      }
+      if (bd >= 9) continue;
+      let score = -bd;
+      if (hint) {
+        const nm = String(w.name || '').toLowerCase(), rf = String(w.ref || '').toLowerCase().split(';').map((v) => v.trim());
+        if ((nm && hint.name && nm === hint.name) || hint.refs.some((v) => rf.indexOf(v) >= 0)) score += 6;
+        score += w.ramp === hint.ramp ? 1.5 : -1.5;
+      }
+      if (score > bs) { bs = score; best = { w, fwd: w.ow === -1 ? true : bdot >= 0 }; }
     }
     return best;
   }
@@ -259,16 +346,20 @@
     const sig = q.have.join(',') + '|' + (furn ? furn.have.join(',') : '') + '|' + (hasElev ? 1 : 0);
 
     /* ---- road class / cross-section for every slice */
-    const secBy = new Map(), sec = (cls, ow, ramp) => { const key = cls + (ow ? 'o' : '') + (ramp ? 'r' : ''); let s = secBy.get(key); if (!s) secBy.set(key, (s = section(cls, ow, ramp))); return s; };
-    const secs = [], camArr = [], clsArr = [], aArr = [];
-    let lastSec = null;
+    const secBy = new Map(), sec = (cls, ow, ramp, L) => { const key = cls + (ow ? 'o' : '') + (ramp ? 'r' : '') + (L ? ':' + L.f + '/' + L.b + '/' + L.c + (L.ow ? 'o' : '') : ''); let s = secBy.get(key); if (!s) secBy.set(key, (s = section(cls, ow, ramp, L))); return s; };
+    const secs = [], camArr = [], clsArr = [], aArr = [], laneWays = furn ? furn.ways : [];
+    let lastSec = null, lanesKnown = 0;
     for (const s of slices) {
       let r = q.have.length ? matchRoad(q.roads, s.x, s.y, s.psi) : null, sc;
-      if (r) sc = sec(r.cls, r.oneway || (r.cls === 'motorway' || r.cls === 'trunk'), r.ramp);
+      const wm = laneWays.length ? matchWay(laneWays, s.x, s.y, s.psi, stepHint(route, s.a)) : null, L = wm ? laneInfo(wm.w, wm.fwd) : null;
+      if (r) sc = sec(r.cls, r.oneway || (r.cls === 'motorway' || r.cls === 'trunk'), r.ramp, L);
+      else if (wm) sc = sec(wm.w.cls === 'unclassified' ? 'minor' : wm.w.cls, wm.w.ow !== 0, wm.w.ramp, L);   // the tile does not show this road, OpenStreetMap does
       else if (lastSec && q.have.length) sc = lastSec;   // keep the last known class through a short gap (e.g. inside a junction)
       else { const g = classFromSteps(route, s.a); sc = sec(g.cls, g.oneway, g.ramp); }
+      if (sc.known) lanesKnown++;
       lastSec = sc; secs.push(sc); camArr.push(sc.cam); clsArr.push(sc.cls); aArr.push(s.a);
     }
+    stats.laneSlices = slices.length ? lanesKnown / slices.length : 0;
 
     lap('classify');
     yield; sliceT = Date.now(); tl = sliceT;
@@ -383,10 +474,24 @@
 
     /* ---- every mapped street (side streets, parking aisles, the opposite carriageway…) */
     const roadZ = 0.12, SUB = 10;
+    /** the lane count OpenStreetMap gives a tile road (matched at its middle, cached on the road while no new cell has arrived) */
+    const lanesVer = MP.street ? MP.street.version : 0;
+    const roadLanes = (r) => {
+      if (r._li && r._li.ver === lanesVer) return r._li.v;
+      const n = r.pts.length >> 1, i = Math.max(0, (n >> 1) - 1), ax = r.pts[2 * i], ay = r.pts[2 * i + 1], bx = r.pts[2 * i + 2], by = r.pts[2 * i + 3];
+      let v = null;
+      if (bx !== undefined && Math.hypot(bx - ax, by - ay) > 0.5) {
+        const m = matchWay(laneWays, (ax + bx) / 2, (ay + by) / 2, Math.atan2(bx - ax, by - ay));
+        v = m ? laneInfo(m.w, m.fwd) : null;
+      }
+      r._li = { ver: lanesVer, v }; return v;
+    };
     const tileRoad = pack(PAL.asphalt[0] + 4, PAL.asphalt[1] + 4, PAL.asphalt[2] + 4, 0);
     const cWhiteP = pack(PAL.white[0], PAL.white[1], PAL.white[2], 255), cYellowP = pack(PAL.yellow[0], PAL.yellow[1], PAL.yellow[2], 255);
     for (const r of q.roads) {
-      const p = r.pts, n = p.length >> 1, hw = r.w / 2;
+      const p = r.pts, n = p.length >> 1;
+      const li = laneWays.length ? roadLanes(r) : null;       // what OpenStreetMap says about this street's lanes (null = not mapped)
+      const rw = li ? Math.max(3.2, li.n * (LANE_W[r.cls] || 3.3)) : r.w, hw = rw / 2;
       // miter offsets per vertex
       const ox = new Float64Array(n), oy = new Float64Array(n);
       for (let i = 0; i < n; i++) {
@@ -407,7 +512,9 @@
         // the street the route itself drives on is covered by the ribbon below: skip it (also avoids two coplanar layers)
         if (hit.d < 2.5 && sl > 1e-6 && Math.abs(((bx - ax) * Math.sin(hit.psi) + (by - ay) * Math.cos(hit.psi)) / sl) > 0.97) continue;
         const parts = Math.max(1, Math.ceil(sl / SUB));
-        const rank = RANK[r.cls] || 0, paint = rank < 2 ? null : r.oneway ? (r.w >= 8 ? [[-0.08, 0.08, cWhiteP, true]] : null) : rank >= 3 ? [[-0.24, -0.08, cYellowP], [0.08, 0.24, cYellowP]] : [[-0.07, 0.07, cYellowP, true]];
+        const rank = RANK[r.cls] || 0, one = r.oneway || (li && li.ow);
+        let paint = rank < 2 ? null : one ? (rw >= 8 ? [[-0.08, 0.08, cWhiteP, true]] : null) : rank >= 3 ? [[-0.24, -0.08, cYellowP], [0.08, 0.24, cYellowP]] : [[-0.07, 0.07, cYellowP, true]];
+        if (li && one && li.n >= 2 && rank >= 2) { paint = []; for (let l = 1; l < li.n; l++) { const x = -hw + (rw * l) / li.n; paint.push([x - 0.08, x + 0.08, cWhiteP, true]); } }   // a one-way street with N mapped lanes: N-1 lane dashes
         let prev = null;
         for (let k = 0; k <= parts; k++) {   // subdivide so the street hugs the ground profile instead of cutting a long chord through it
           const u = k / parts, cx = ax + (bx - ax) * u, cy = ay + (by - ay) * u, oxx = ox[i] + (ox[i + 1] - ox[i]) * u, oyy = oy[i] + (oy[i + 1] - oy[i]) * u;
@@ -500,10 +607,14 @@
       const r = b.ring, m = r.length >> 1, gz = zOf(hit.a), h = b.h, seed = Math.floor(cx * 0.37) * 7919 + Math.floor(cy * 0.37);
       const wc = shade(WALLS[(hash2(seed, 1, 3) * WALLS.length) | 0], 0.95 + hash2(seed, 2, 3) * 0.1), rc = ROOFS[(hash2(seed, 4, 3) * ROOFS.length) | 0];
       const wallC = pack(wc[0], wc[1], wc[2], 0), roofC = pack(rc[0], rc[1], rc[2], 0);
-      const zb = gz - 0.6, zt = gz + h;
+      const zb = gz - 0.6;
       // gabled roof for small rectangular houses; flat roof otherwise
       let area = 0; for (let i = 0, j = m - 1; i < m; j = i++) area += r[2 * j] * r[2 * i + 1] - r[2 * i] * r[2 * j + 1]; area = Math.abs(area) / 2;
       const gable = m === 4 && area < 450 && area > 40 && h < 9;
+      let rise = 0;
+      if (gable) { const e01 = Math.hypot(r[2] - r[0], r[3] - r[1]), e12 = Math.hypot(r[4] - r[2], r[5] - r[3]); rise = Math.min(2.6, 0.3 * Math.min(e01, e12)); }
+      // a building's height in the data is to the top of its roof: the walls stop where the gable starts (never below a storey's worth)
+      const zt = gz + (gable ? Math.max(2.4, h - rise) : h);
       for (let i = 0; i < m; i++) {
         const j = (i + 1) % m;
         wall(detail, r[2 * i] - O.x, r[2 * i + 1] - O.y, r[2 * j] - O.x, r[2 * j + 1] - O.y, zb, zt, wallC);
@@ -513,7 +624,7 @@
         const e01 = Math.hypot(P[1][0] - P[0][0], P[1][1] - P[0][1]), e12 = Math.hypot(P[2][0] - P[1][0], P[2][1] - P[1][1]);
         // ridge runs parallel to the longer pair of edges
         const [a, b2, c2, d2] = e01 >= e12 ? [P[0], P[1], P[2], P[3]] : [P[1], P[2], P[3], P[0]];
-        const m1 = [(b2[0] + c2[0]) / 2, (b2[1] + c2[1]) / 2], m2 = [(d2[0] + a[0]) / 2, (d2[1] + a[1]) / 2], rise = Math.min(2.6, 0.3 * Math.min(e01, e12));
+        const m1 = [(b2[0] + c2[0]) / 2, (b2[1] + c2[1]) / 2], m2 = [(d2[0] + a[0]) / 2, (d2[1] + a[1]) / 2];
         detail.quad([a[0], a[1], zt], [b2[0], b2[1], zt], [m1[0], m1[1], zt + rise], [m2[0], m2[1], zt + rise], roofC);
         detail.quad([c2[0], c2[1], zt], [d2[0], d2[1], zt], [m2[0], m2[1], zt + rise], [m1[0], m1[1], zt + rise], roofC);
         detail.tri(b2[0], b2[1], zt, c2[0], c2[1], zt, m1[0], m1[1], zt + rise, wallC);
@@ -557,13 +668,13 @@
         const s = secAt(J.a), ps = path.pose(J.a).psi, fx = Math.sin(ps), fy = Math.cos(ps), rx = fy, ry = -fx;
         const latR = s.hw + s.shR + 1.6, latL = -(s.hw + s.shL + 1.6), aFar = J.a + J.half + 1.5, aNear = J.a - J.half - 1.5;
         // facing the route's own traffic: a mast arm from the far-right corner, a head over each of its lanes
-        const lanes = s.multi ? Array.from({ length: Math.min(3, s.lanes) }, (_, i) => -s.hw + (s.w * (i + 0.5)) / s.lanes) : s.hw >= 4.4 ? [s.hw * 0.28, s.hw * 0.72] : [s.hw * 0.5];
+        const lanes = s.heads;
         mast(aFar, latR, aFar, Math.min(...lanes) - 0.9, lanes.map((l) => [aFar, l]), -fx, -fy);
-        if (!s.multi) mast(aNear, latL, aNear, -s.hw * 0.5 + 0.9, [[aNear, -s.hw * 0.5]], fx, fy);                       // facing oncoming traffic
+        if (!s.multi) mast(aNear, latL, aNear, s.oppC + 0.9, [[aNear, s.oppC]], fx, fy);                                  // facing oncoming traffic
         if (J.right) mast(aFar, latL, J.a - 0.5, latL, [[J.a + Math.max(0.8, Math.min(J.half - 1, J.w * 0.25)), latL]], rx, ry);   // facing each side street
         if (J.left) mast(aNear, latR, J.a + 0.5, latR, [[J.a - Math.max(0.8, Math.min(J.half - 1, J.w * 0.25)), latR]], -rx, -ry);
         // the stop line is where the signal makes the route's traffic wait
-        const x0 = s.multi ? -s.hw + 0.5 : 0.3, sa = J.a - J.half - 0.4;
+        const x0 = s.lx0 + 0.3, sa = J.a - J.half - 0.4;
         base.quad(P(sa - 0.6, x0, lz + 0.01), P(sa - 0.6, s.hw - 0.5, lz + 0.01), P(sa, s.hw - 0.5, lz + 0.01), P(sa, x0, lz + 0.01), cWht);
         stats.signals++;
       }
@@ -590,7 +701,7 @@
           if (!J) continue;   // on the route but no junction nearby: which direction it controls is unknown
           const p = ours ? P(hit.a, s.hw + s.shR + 1.3) : P(hit.a, -(s.hw + s.shL + 1.3));
           sign(p[0], p[1], p[2], ours ? -fx : fx, ours ? -fy : fy, n.k);
-          if (ours && n.k === 't') { const x0 = s.multi ? -s.hw + 0.5 : 0.3; base.quad(P(hit.a - 0.6, x0, lz + 0.01), P(hit.a - 0.6, s.hw - 0.5, lz + 0.01), P(hit.a, s.hw - 0.5, lz + 0.01), P(hit.a, x0, lz + 0.01), cWht); }
+          if (ours && n.k === 't') { const x0 = s.lx0 + 0.3; base.quad(P(hit.a - 0.6, x0, lz + 0.01), P(hit.a - 0.6, s.hw - 0.5, lz + 0.01), P(hit.a, s.hw - 0.5, lz + 0.01), P(hit.a, x0, lz + 0.01), cWht); }
         } else if (hit.d < 45) {
           // on a side street: it faces the traffic that is approaching the route
           let vx = hit.x - n.x, vy = hit.y - n.y; const vl = Math.hypot(vx, vy) || 1; vx /= vl; vy /= vl;
@@ -678,7 +789,7 @@
     }
     stats.trees = nt; lap('trees');
     stats.ms = Date.now() - t0; stats.stages = tm;
-    return { k, a0, a1, origin: O, base: base.done(), detail: detail.done(), bb, need: q.need, have: q.have, needF: furn ? furn.need : [], sig, junctions: junctions.filter((J) => own(J.a) && !J.mid).map((J) => ({ a: J.a, half: J.half, name: J.name, left: J.left, right: J.right, signal: J.signal, stop: J.stopUs, cls: J.cls })), slices: { a: aArr, cam: camArr, cls: clsArr, x: slices.map((q2) => q2.x), y: slices.map((q2) => q2.y), z: slices.map((q2) => zOf(q2.a)) }, stats };
+    return { k, a0, a1, origin: O, base: base.done(), detail: detail.done(), bb, need: q.need, have: q.have, needF: furn ? furn.need : [], sig, junctions: junctions.filter((J) => own(J.a) && !J.mid).map((J) => ({ a: J.a, half: J.half, name: J.name, left: J.left, right: J.right, signal: J.signal, stop: J.stopUs, cls: J.cls })), slices: { a: aArr, cam: camArr, cls: clsArr, lanes: secs.map((s) => (s.known ? s.lanes : 0)), width: secs.map((s) => s.w), x: slices.map((q2) => q2.x), y: slices.map((q2) => q2.y), z: slices.map((q2) => zOf(q2.a)) }, stats };
   };
 
   /** build a chunk to completion (tests, and the first frames of a trip) */

@@ -7,7 +7,7 @@ const path = require('path'), fs = require('fs');
 const { eq, near, MP } = require('./unit.js');
 const L = (f) => require(path.join(__dirname, '../js', f));
 const F = (f) => fs.readFileSync(path.join(__dirname, 'fixtures', f));
-L('mvt.js'); L('path.js'); const WORLD = L('world.js'); const STREET = L('street.js'); const TER = L('terrain.js');
+L('mvt.js'); const PMT = L('pmtiles.js'); L('path.js'); const WORLD = L('world.js'); const STREET = L('street.js'); const TER = L('terrain.js');
 
 const tests = [];
 const t = (name, fn) => tests.push([name, fn]);
@@ -95,6 +95,7 @@ t('straight() path matches the sample/pose interface', () => {
 
 group('scenery service (world.js)');
 const TPL = 'https://tiles.example/planet/v1/{z}/{x}/{y}.pbf';
+WORLD.cfg.overture.off = true;   // the Overture archive has its own group below; here only the OSM tiles are under test
 const tileFetch = (log, opts) => async (url) => {
   log && log.push(url);
   if (url === WORLD.cfg.tilejson) return { ok: true, status: 200, json: async () => ({ tiles: [TPL] }) };
@@ -194,7 +195,35 @@ t('cross-sections follow road class: markings, lanes, camera lane', () => {
   eq(res.lines.length, 0, 'residential streets are unmarked');
   eq(pri.lines.filter((l) => l.c === TER.PAL.yellow && !l.dash).length, 2, 'primary: double yellow'); ok(pri.lines.some((l) => l.c === TER.PAL.white), 'white edge lines');
   eq(ter.lines.filter((l) => l.dash && l.c === TER.PAL.yellow).length, 1, 'tertiary: dashed yellow');
-  ok(pri.cam > 0, 'two-way road: the car is right of the centre line'); near(TER.section('motorway', true, false).cam, 0, 0.01, 'three lanes → middle lane');
+  ok(pri.cam > 0, 'two-way road: the car is right of the centre line');
+  // lane count unknown: a freeway carriageway is drawn with what its class usually has (2), and says it is a guess
+  const mw2 = TER.section('motorway', true, false); eq(mw2.lanes, 2); eq(mw2.known, false); ok(mw2.cam > 0, 'two lanes → the right-hand one');
+  // lane count known (OpenStreetMap lanes=3): three lanes, the camera in the middle one
+  const mw3 = TER.section('motorway', true, false, { f: 3, b: 0, c: 0, ow: true }); eq(mw3.lanes, 3); eq(mw3.known, true); near(mw3.cam, 0, 0.01, 'three lanes → middle lane'); near(mw3.w, 3 * TER.LANE_W.motorway, 1e-9);
+  eq(mw3.lines.filter((l) => l.dash).length, 2, 'three lanes have two dashed dividers');
+});
+t('lane tags → what is drawn: one-way, two-way, centre turn lane, forward/backward splits, direction of travel', () => {
+  const L = TER.laneInfo;
+  eq(L({ ow: 1, lanes: 2 }, true).f, 2); eq(L({ ow: 1, lanes: 2 }, true).b, 0); eq(L({ ow: 1, lanes: 2 }, true).ow, true);
+  let x = L({ ow: 0, lanes: 2 }, true); eq(x.f + ':' + x.b + ':' + x.c, '1:1:0');
+  x = L({ ow: 0, lanes: 3 }, true); eq(x.f + ':' + x.b + ':' + x.c, '1:1:1', 'three lanes on a two-way road: a shared centre turn lane');
+  x = L({ ow: 0, lanes: 4 }, true); eq(x.f + ':' + x.b + ':' + x.c, '2:2:0');
+  x = L({ ow: 0, lanes: 5 }, true); eq(x.f + ':' + x.b + ':' + x.c, '2:2:1');
+  // lanes=4 with lanes:forward=1 lanes:backward=2 (+ both_ways): as mapped on Van Dyke Road
+  x = L({ ow: 0, lanes: 4, f: 1, b: 2, bw: 1 }, true); eq(x.f + ':' + x.b + ':' + x.c, '1:2:1');
+  x = L({ ow: 0, lanes: 4, f: 1, b: 2, bw: 1 }, false); eq(x.f + ':' + x.b + ':' + x.c, '2:1:1', 'going against the way: forward and backward swap');
+  x = L({ ow: 0, lanes: 3, f: 2 }, true); eq(x.f + ':' + x.b + ':' + x.c, '2:1:0', 'only one direction given: the rest is the other way');
+  eq(L({ ow: 0, lanes: null, f: null, b: null }, true), null, 'no lane tag: nothing is known');
+  eq(L(null, true), null);
+  // the pavement built from it: width follows the count, centre turn lane is painted, the car rides one of OUR lanes
+  const s = TER.section('primary', false, false, { f: 1, b: 1, c: 1, ow: false });
+  near(s.w, 3 * TER.LANE_W.primary, 1e-9); eq(s.lanes, 1); eq(s.centre, 1);
+  ok(s.lines.filter((l) => l.c === TER.PAL.yellow).length === 4, 'solid + dashed yellow on each side of the centre lane');
+  ok(s.cam > s.lx0 && s.cam < s.hw, 'camera is in our lane, right of the turn lane');
+  const four = TER.section('primary', false, false, { f: 2, b: 2, c: 0, ow: false });
+  eq(four.lines.filter((l) => l.c === TER.PAL.yellow && !l.dash).length, 2, 'double yellow between the directions'); eq(four.lines.filter((l) => l.dash && l.c === TER.PAL.white).length, 2, 'one white dash per direction');
+  ok(four.known && four.heads.length === 2 && four.heads[0] > 0, 'signal heads hang over our two lanes only');
+  const res3 = TER.section('residential', false, false, { f: 1, b: 1, c: 1, ow: false }); ok(res3.lines.length > 0, 'a residential street mapped with 3 lanes is painted');
 });
 t('real chunks: finite, populated, deterministic', async () => {
   const r = await loadTile(); const C = ctxFor(r, { debug: true });
@@ -313,6 +342,167 @@ t('signal masts, signs, lamps and crosswalks are built — and nothing without t
 t('the road markings open up at a side street', async () => {
   const r = await loadTile(), c = TER.buildChunk(ctxFor(r), 1), plain = TER.buildChunk(ctxFor(r, { noWorld: true }), 1);
   ok(c.junctions.length >= 2 && plain.junctions.length === 0, 'junctions come only from mapped streets');
+});
+
+group('Overture buildings (pmtiles.js + world.js)');
+const zlib = require('zlib');
+const OVT_BYTES = () => new Uint8Array(zlib.gunzipSync(F('overture-14-4413-6046.mvt.gz')));
+/** a minimal real-format PMTiles v3 archive: header, gzip root directory, one gzip leaf directory, gzip tiles */
+function buildArchive(tiles /* [{z,x,y,bytes}] */, o) {
+  o = o || {};
+  const varint = (n) => { const out = []; while (n >= 128) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
+  const dir = (es) => { const b = []; b.push(...varint(es.length)); let last = 0; for (const e of es) { b.push(...varint(e.id - last)); last = e.id; } for (const e of es) b.push(...varint(e.run)); for (const e of es) b.push(...varint(e.len)); es.forEach((e, i) => b.push(...varint(i > 0 && e.off === es[i - 1].off + es[i - 1].len ? 0 : e.off + 1))); return zlib.gzipSync(Buffer.from(b)); };
+  const items = tiles.map((t) => ({ id: PMT.tileId(t.z, t.x, t.y), data: zlib.gzipSync(Buffer.from(t.bytes)) })).sort((a, b) => a.id - b.id);
+  let off = 0; items.forEach((it) => { it.off = off; it.len = it.data.length; off += it.len; });
+  const data = Buffer.concat(items.map((i) => i.data));
+  // the first tile is reachable from the root directory; the rest only through a leaf directory
+  const leafEntries = items.slice(1).map((it) => ({ id: it.id, run: 1, len: it.len, off: it.off }));
+  const leaf = items.length > 1 ? dir(leafEntries) : Buffer.alloc(0);
+  const rootEs = [{ id: items[0].id, run: 1, len: items[0].len, off: items[0].off }];
+  if (leafEntries.length) rootEs.push({ id: items[1].id, run: 0, len: leaf.length, off: 0 });
+  const root = dir(rootEs);
+  const head = Buffer.alloc(127); head.write('PMTiles', 0, 'latin1'); head[7] = 3;
+  const w64 = (v, p) => head.writeBigUInt64LE(BigInt(v), p);
+  w64(127, 8); w64(root.length, 16); w64(0, 24); w64(0, 32);
+  const leafOff = 127 + root.length; w64(leafOff, 40); w64(leaf.length, 48);
+  const dataOff = leafOff + leaf.length; w64(dataOff, 56); w64(data.length, 64);
+  w64(items.length, 72); w64(rootEs.length, 80); w64(items.length, 88);
+  head[96] = 1; head[97] = 2; head[98] = 2; head[99] = 1; head[100] = 0; head[101] = o.maxZ || 14;
+  const file = Buffer.concat([head, root, leaf, data]);
+  const log = [];
+  const fetchFn = async (url, init) => {
+    const m = /bytes=(\d+)-(\d+)/.exec((init && init.headers && init.headers.Range) || ''); log.push(m ? m[0] : 'full');
+    if (o.ignoreRange || !m) return { ok: true, status: 200, arrayBuffer: async () => file.buffer.slice(file.byteOffset, file.byteOffset + file.length) };
+    const a = +m[1], b = Math.min(file.length - 1, +m[2]), sl = file.subarray(a, b + 1);
+    return { ok: true, status: 206, arrayBuffer: async () => sl.buffer.slice(sl.byteOffset, sl.byteOffset + sl.length) };
+  };
+  return { fetch: fetchFn, log, file };
+}
+t('tile ids follow the PMTiles Hilbert order (spec vectors) and the real Sterling Heights tile', () => {
+  const id = (z, x, y) => PMT.tileId(z, x, y);
+  eq(id(0, 0, 0), 0); eq(id(1, 0, 0), 1); eq(id(1, 0, 1), 2); eq(id(1, 1, 1), 3); eq(id(1, 1, 0), 4);
+  ok(id(2, 0, 0) === 5 && id(14, 4413, 6046) > id(13, 2206, 3023), 'zoom levels are consecutive ranges');
+  // the id of the tile that the live Overture archive answered with the Sterling Heights fixture (checked against the real service)
+  ok(id(14, 4413, 6046) > 89478485 && id(14, 4413, 6046) < 357913941, 'inside the z14 id range');
+});
+t('reader: header, root directory, a leaf directory and the tile; leaf directories are cached', async () => {
+  const A = Buffer.from('tile A'), B = Buffer.from('tile B bytes');
+  const arc = buildArchive([{ z: 14, x: 4413, y: 6046, bytes: A }, { z: 14, x: 4413, y: 6047, bytes: B }]);
+  const a = PMT.open('https://x/archive.pmtiles', { fetch: arc.fetch });
+  const first = await a.tile(14, 4413, 6046), second = await a.tile(14, 4413, 6047);
+  eq(Buffer.from(first).toString(), 'tile A'); eq(Buffer.from(second).toString(), 'tile B bytes');
+  const before = a.requests; await a.tile(14, 4413, 6047); eq(a.requests, before + 1, 'only the tile itself is fetched the second time (leaf cached)');
+  eq(await a.tile(14, 1, 1), null, 'an absent tile is null, not an error');
+  eq(await a.tile(15, 1, 1), null, 'beyond the archive max zoom is null');
+  ok(arc.log[0] === 'bytes=0-16383', 'first request reads the header + root directory: ' + arc.log[0]);
+});
+t('reader: a server that ignores Range is refused (never read a 180 GB file) and a bad file is rejected', async () => {
+  const arc = buildArchive([{ z: 14, x: 1, y: 1, bytes: Buffer.from('x') }], { ignoreRange: true });
+  const a = PMT.open('https://x/a.pmtiles', { fetch: arc.fetch });
+  let err = null; try { await a.tile(14, 1, 1); } catch (e) { err = e; }
+  ok(err && /ignores range/.test(err.message), 'refused: ' + (err && err.message));
+  const bad = PMT.open('https://x/b.pmtiles', { fetch: async () => ({ ok: true, status: 206, arrayBuffer: async () => new Uint8Array(200).buffer }) });
+  let err2 = null; try { await bad.tile(14, 1, 1); } catch (e) { err2 = e; }
+  ok(err2 && /not a PMTiles/.test(err2.message), 'rejected: ' + (err2 && err2.message));
+});
+t('Overture footprints: real tile, sized like real buildings, tile-owned, none underground', () => {
+  const layers = MP.mvt.decode(OVT_BYTES(), ['building']);
+  const list = WORLD.compactOverture(layers);
+  ok(list.length > 2000, 'footprints ' + list.length);
+  for (const b of list) { ok(b.h >= 2.5 && b.h < 400, 'height ' + b.h); const cx = (b.bb[0] + b.bb[2]) / 2, cy = (b.bb[1] + b.bb[3]) / 2; ok(cx >= 0 && cx < 4096 && cy >= 0 && cy < 4096, 'centre inside the tile'); }
+  // houses are a few metres tall, from the tile's own height / floor-count properties
+  const hs = list.map((b) => b.h).sort((a, b) => a - b); ok(hs[hs.length >> 1] > 2.5 && hs[hs.length >> 1] < 9, 'median height ' + hs[hs.length >> 1]);
+  // underground buildings are dropped
+  const fake = { building: { extent: 4096, features: [{ props: { is_underground: true, height: 5 }, polys: [{ outer: Float64Array.from([10, 10, 50, 10, 50, 50, 10, 50, 10, 10]), holes: [] }] }, { props: { is_underground: false, class: 'garage' }, polys: [{ outer: Float64Array.from([10, 10, 50, 10, 50, 50, 10, 50, 10, 10]), holes: [] }] }] } };
+  const f = WORLD.compactOverture(fake); eq(f.length, 1); eq(f[0].h, 3, 'a garage with no height is drawn at a garage height, not a house height');
+});
+t('world: Overture replaces OSM footprints for a tile, the chunk signature changes, and OSM stays where Overture has nothing', async () => {
+  WORLD.cfg.overture.off = false; WORLD.reset(); WORLD.fetchImpl = tileFetch(null);
+  let calls = 0; const realTile = WORLD.overtureTile;
+  WORLD.overtureTile = async () => { calls++; return OVT_BYTES(); };
+  WORLD.want([{ lat: 42.58, lng: -83.03 }], true); await wait(40);
+  const osmCount = WORLD.tiles.get('4413/6046').data.buildings.length;
+  await wait(250);
+  const tile = WORLD.tiles.get('4413/6046');
+  eq(tile.state, 'ok'); eq(tile.bs, 'ok'); eq(calls, 1, 'one Overture request for the tile');
+  ok(tile.data.buildings.length > osmCount * 0.9 && tile.data.buildings.length > 2000, 'overture ' + tile.data.buildings.length + ' vs osm ' + osmCount);
+  eq(WORLD.tileSig('4413/6046'), '4413/6046+o');
+  const q = WORLD.query(FRAME, [-83.03 * FRAME.kx - 300, 42.58 * FRAME.ky - 300, -83.03 * FRAME.kx + 300, 42.58 * FRAME.ky + 300]);
+  ok(q.buildings.length > 100 && q.have[0] === '4413/6046+o', 'query serves the Overture footprints: ' + q.buildings.length);
+  // no Overture tile → OSM footprints remain, and the tile is not asked again
+  WORLD.reset(); calls = 0; WORLD.overtureTile = async () => { calls++; return null; };
+  WORLD.want([{ lat: 42.58, lng: -83.03 }], true); await wait(300);
+  const t2 = WORLD.tiles.get('4413/6046'); eq(t2.bs, 'empty'); ok(t2.data.buildings.length > 1000, 'OSM footprints kept: ' + t2.data.buildings.length);
+  WORLD.want([{ lat: 42.58, lng: -83.03 }], true); await wait(60); eq(calls, 1, 'an empty answer is remembered for the session');
+  // service down → error status, OSM stays, retried after back-off
+  WORLD.reset(); WORLD.overtureTile = async () => { throw new Error('buildings service down'); };
+  WORLD.want([{ lat: 42.58, lng: -83.03 }], true); await wait(300);
+  const t3 = WORLD.tiles.get('4413/6046'); eq(t3.bs, 'err'); ok(t3.data.buildings.length > 1000, 'OSM footprints stay while the service is down');
+  WORLD.overtureTile = realTile; WORLD.cfg.overture.off = true; WORLD.reset(); WORLD.fetchImpl = null;
+});
+t('real chunk: more footprints in → more buildings drawn, deterministic', async () => {
+  WORLD.reset(); WORLD.fetchImpl = tileFetch(null);
+  const r = sterling(); WORLD.want([r.pointAt(0)], true); await wait(80);
+  const tile = WORLD.tiles.get('4413/6046'); const osmN = tile.data.buildings.length;
+  const before = TER.buildChunk(ctxFor(r), 1);
+  const ov = WORLD.compactOverture(MP.mvt.decode(OVT_BYTES(), ['building']));
+  tile.data.buildings = ov; tile.data.local = null; tile.bs = 'ok';
+  const after = TER.buildChunk(ctxFor(r), 1), again = TER.buildChunk(ctxFor(r), 1);
+  ok(after.stats.buildings > 0 && before.stats.buildings > 0, 'both draw buildings: ' + before.stats.buildings + ' / ' + after.stats.buildings);
+  eq(after.detail.n, again.detail.n, 'deterministic'); ok(after.sig !== before.sig, 'chunk signature records the Overture source');
+  WORLD.reset(); WORLD.fetchImpl = null;
+});
+
+group('lanes and speed limits (real OpenStreetMap ways)');
+// fixtures/overpass-ways-13-2206-3023.json is the REAL Overpass reply for the lanes/maxspeed query of the same Sterling Heights cell.
+const wayEls = () => JSON.parse(F('overpass-ways-13-2206-3023.json').toString()).elements;
+const loadStreetWays = async (r, o) => {
+  STREET.reset();
+  STREET.fetchImpl = async (q) => (/way\[/.test(q) ? (o && o.noWays ? Promise.reject(new Error('overpass busy (504)')) : wayEls()) : streetEls());
+  STREET.want([r.pointAt(0)], true); await wait(60);
+};
+t('parses lane counts, directions, one-way and speed limits from real ways', () => {
+  const w = STREET.parseWays(wayEls());
+  ok(w.length > 200, 'ways ' + w.length);
+  const vd = w.filter((x) => x.name === 'Van Dyke Avenue'); ok(vd.length >= 4 && vd.every((x) => x.ow === 1 && x.lanes >= 3 && x.ms > 70 && x.ms < 75), 'Van Dyke: one-way carriageways, 45 mph = ' + vd.map((x) => x.lanes + '@' + Math.round(x.ms)).join(','));
+  const seventeen = w.find((x) => x.name === '17 Mile Road' && x.f != null); ok(seventeen && seventeen.ow === 0 && seventeen.bw === 1, 'two-way with forward/backward lanes and a centre lane');
+  eq(STREET.kmh('45 mph'), 45 * 1.609344); eq(STREET.kmh('50'), 50); eq(STREET.kmh('none'), null); eq(STREET.kmh('signals'), null); eq(STREET.kmh('1000'), null); eq(STREET.kmh(undefined), null);
+  eq(STREET.parseWays([{ type: 'node', id: 1, lat: 1, lon: 2 }]).length, 0, 'nodes are not ways');
+  ok(/\["lanes"\]/.test(STREET.queryWays(2206, 3023)) && /\["maxspeed"\]/.test(STREET.queryWays(2206, 3023)), 'the query asks for lane and maxspeed tags');
+});
+t('the route’s own road is built with its mapped lane counts (not a width guess)', async () => {
+  const r = await loadTile(); await loadStreetWays(r);
+  const ways = STREET.parseWays(wayEls()).filter((x) => x.name === 'Van Dyke Avenue');
+  let checked = 0, known = 0, total = 0;
+  const vdStep = r.steps.filter((s) => s.name === 'Van Dyke Avenue').sort((a, b) => b.dist - a.dist)[0];   // the long Van Dyke Avenue stretch of the route
+  for (let k = 0; k * TER.CH < r.total; k++) {
+    const c = TER.buildChunk(ctxFor(r), k); known += c.slices.lanes.filter(Boolean).length; total += c.slices.lanes.length;
+    for (let i = 0; i < c.slices.a.length; i++) {
+      const a = c.slices.a[i]; if (a < vdStep.d + 60 || a > vdStep.d + vdStep.dist - 60) continue;   // well inside it
+      const lanes = c.slices.lanes[i]; if (!lanes) continue;
+      ok(ways.some((w) => w.lanes === lanes), 'slice at ' + Math.round(a) + ' m has ' + lanes + ' lanes, which no Van Dyke way has');
+      near(c.slices.width[i], lanes * TER.LANE_W.primary, 1e-6, 'width follows the lane count'); checked++;
+    }
+  }
+  ok(checked > 40, 'Van Dyke slices checked: ' + checked); ok(known / total > 0.4, 'share of the route with known lanes ' + (known / total).toFixed(2));
+});
+t('without lane data the road is drawn with its class default and marked unknown; a failed lanes request leaves signals and signs intact', async () => {
+  const r = await loadTile(); await loadStreetWays(r, { noWays: true });
+  const cell = STREET.cells.get('2206/3023'); eq(cell.state, 'ok'); eq(cell.ws, 'err', 'the ways request failed on its own');
+  let known = 0, sig = 0; for (let k = 0; k * TER.CH < r.total; k++) { const c = TER.buildChunk(ctxFor(r), k); known += c.slices.lanes.filter(Boolean).length; sig += c.stats.signals; }
+  eq(known, 0, 'nothing claimed to be known'); ok(sig >= 3, 'signals still built: ' + sig);
+  // back-off elapsed → only the ways are asked for again, and the chunk signature records that they arrived
+  const before = TER.buildChunk(ctxFor(r), 2).sig;
+  STREET.fetchImpl = async (q) => (/way\[/.test(q) ? wayEls() : Promise.reject(new Error('nodes must not be refetched')));
+  cell.wat = 0; STREET.want([r.pointAt(0)], true); await wait(60);
+  eq(cell.ws, 'ok'); ok(TER.buildChunk(ctxFor(r), 2).sig !== before, 'chunk is rebuilt once lanes arrive');
+});
+t('speed limit under a position: the road we are on, in the direction we are going, in km/h; unknown stays unknown', async () => {
+  const r = await loadTile(); await loadStreetWays(r);
+  const p = r.pointAt(2400);                                    // on Van Dyke Avenue (45 mph, one-way along the route)
+  const lim = STREET.limitAt(p.lat, p.lng, p.bearing); near(lim, 45 * 1.609344, 0.01, 'Van Dyke Avenue is posted 45 mph');
+  eq(STREET.limitAt(p.lat, p.lng, (p.bearing + 180) % 360), null, 'driving the other way on a one-way carriageway: that is not this road');
+  eq(STREET.limitAt(p.lat + 0.05, p.lng, 0), null, 'a place with no loaded cell has no limit');
 });
 
 // ---------------------------------------------------------------- runner

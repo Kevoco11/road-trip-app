@@ -4,6 +4,10 @@
  * One tile is ~1.8 km wide and 40–150 kB; tiles are immutable per data version, so the service worker caches
  * them cache-first and the Drive tab keeps working offline over ground you have already driven or previewed.
  *
+ * Buildings come from a second, richer source where it has them: Overture Maps (Esri Community Maps and Microsoft
+ * footprints conflated with OpenStreetMap), read tile by tile out of a PMTiles archive (pmtiles.js). OSM alone holds
+ * 18 buildings in a suburban tile where Overture holds 535. See "Overture buildings" below.
+ *
  *   MP.world.want(points)            ask for the tiles under/near these {lat,lng} points (cheap, call every frame)
  *   MP.world.query(frame, bbox)      localized features in route metres: { buildings, covers, roads, need, have }
  *   MP.world.version                 bumps whenever a new tile finishes loading (meshes rebuild when it matters)
@@ -22,6 +26,12 @@
   const CFG = (W.cfg = {
     tilejson: 'https://tiles.openfreemap.org/planet', Z: 14, EXT: 4096, keep: 16, concurrency: 3,
     layers: ['building', 'landcover', 'landuse', 'park', 'water', 'transportation', 'transportation_name'],
+    // Overture Maps building footprints (keyless, CORS-open, range-readable). Release files are retired after ~60 days, so the
+    // current release is read from Overture's STAC index (and the last known one is the fallback).
+    overture: {
+      stac: 'https://stac.overturemaps.org/catalog.json', fallback: '2026-09-23.1', concurrency: 2, ttl: 30 * 86400000, keep: 160,
+      url: (rel) => 'https://overturemaps-extras-us-west-2.s3.amazonaws.com/tiles/' + rel + '/buildings.pmtiles',
+    },
   });
 
   /* land-cover kinds. `p` is paint priority (higher paints over lower), `k` the id the raster stores */
@@ -152,6 +162,9 @@
     return out;
   };
 
+  /** what a loaded tile contributes, as a string: changes when its buildings are replaced by Overture's, so built chunks rebuild */
+  W.tileSig = function (k) { const t = W.tiles.get(k); return t && t.state === 'ok' ? k + (t.bs === 'ok' ? '+o' : '') : null; };
+
   /** features from every loaded tile that overlaps bb (route metres). `need`/`have` let callers know whether to rebuild later */
   W.query = function (frame, bb) {
     const need = W.tilesFor(frame, bb), res = { buildings: [], covers: [], roads: [], names: [], need: [], have: [] };
@@ -160,7 +173,7 @@
       const k = keyOf(x, y); res.need.push(k);
       const t = W.tiles.get(k);
       if (!t || t.state !== 'ok') continue;
-      res.have.push(k);
+      res.have.push(W.tileSig(k));
       const L = localize(t.data, frame);
       for (const b of L.buildings) if (hit(b.bb)) res.buildings.push(b);
       for (const c of L.covers) if (hit(c.bb)) res.covers.push(c);
@@ -195,6 +208,7 @@
         t.data = W.compact(MP.mvt.decode(buf, CFG.layers), x, y); t.state = 'ok';
       }
       W.version++; mark(true, Date.now() - t0); emit('world', k);
+      ensureBuildings(x, y, k);
     } catch (e) {
       t.state = 'err'; t.at = Date.now(); t.fails = (t.fails || 0) + 1; mark(false, 0, e && e.name === 'AbortError' ? 'scenery timed out' : (e && e.message) || 'failed');
     } finally { inflight--; pump(); }
@@ -208,6 +222,7 @@
     if (t) {
       touch(k);
       if (t.state === 'err' && Date.now() - t.at > Math.min(300000, 15000 * Math.pow(2, (t.fails || 1) - 1))) { t.state = 'load'; queue.push([x, y, k]); pump(); }
+      else if (t.state === 'ok' && t.bs !== 'ok' && t.bs !== 'empty') ensureBuildings(x, y, k);
       return t;
     }
     t = { state: 'load', data: null, at: Date.now(), fails: 0 }; W.tiles.set(k, t); trim();
@@ -229,7 +244,125 @@
       for (const x of xs) for (const y of ys) { const k = keyOf(x, y); if (y < 0 || y >= N || seen.has(k)) continue; seen.add(k); W.request(x, y); }
     }
   };
-  W.reset = function () { W.tiles.clear(); queue.length = 0; W.version++; };
+  W.reset = function () { W.tiles.clear(); queue.length = 0; bqueue.length = 0; W.version++; };
+
+  /* ------------------------------------------------------------------ Overture buildings */
+  /* A tile's Overture footprints REPLACE its OSM ones when there are at least as many (Overture already contains OSM's), so
+   * nothing is drawn twice. Until they arrive — or where Overture has none, or the service cannot be reached — the OSM ones
+   * stay. Either way every building is a real footprint; an unmapped building is simply absent, never invented. */
+  const OV = (W.overture = { release: null, archive: null, status: { state: 'idle', err: null, tiles: 0, buildings: 0 } });
+  const SMALL = { garage: 3, garages: 3, shed: 2.8, carport: 2.8, roof: 3, greenhouse: 3.5, cabin: 4.5, kiosk: 3, hut: 2.8, barn: 7, stable: 5, outbuilding: 3, parking: 3, service: 4 };
+  function markB(ok, err) {
+    OV.status.state = ok ? 'ok' : 'error'; OV.status.err = err || null;
+    if (MP.intel && MP.intel.status) { MP.intel.status.buildings = { ok, at: Date.now(), ms: 0, err: err || null }; emit('intel-status', 'buildings'); }
+  }
+
+  /** Overture's building layer (tile units, y south) → the same compact form as W.compact's buildings */
+  W.compactOverture = function (layers) {
+    const lay = layers && (layers.building || layers.buildings), out = [];
+    if (!lay) return out;
+    const E = CFG.EXT, sc = E / (lay.extent || E);
+    for (const ft of lay.features) {
+      const p = ft.props || {};
+      if (p.is_underground === true || p.is_underground === 'true') continue;       // a tunnel, a basement car park: nothing to see from the road
+      const fl = Number(p.num_floors) || 0, hh = Number(p.height);
+      const h = Math.max(2.5, hh > 0 ? hh : fl > 0 ? fl * 3.2 : SMALL[p.class] || 6);   // measured height, else floors, else what its class usually is
+      for (const poly of ft.polys || []) {
+        let ring = f32(poly.outer, true);
+        if (sc !== 1) ring = ring.map((v) => v * sc);
+        const bb = polyBBox(ring), cx = (bb[0] + bb[2]) / 2, cy = (bb[1] + bb[3]) / 2;
+        if (!(cx >= 0 && cx < E && cy >= 0 && cy < E)) continue;                   // the neighbouring tile owns it (buffer duplicates)
+        out.push({ ring, h, minH: 0, bb });
+      }
+    }
+    return out;
+  };
+
+  /** the current Overture release (a date like 2026-09-23.1), from the STAC index; cached a day, with a built-in fallback */
+  W.overtureRelease = async function (force) {
+    const saved = store() ? store().get('ovtRelease', null) : null;
+    if (!force && saved && Date.now() - saved.at < 24 * 3600000) return saved.release;
+    try {
+      const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null, timer = ctl ? setTimeout(() => ctl.abort(), 12000) : null;
+      const res = await F()(CFG.overture.stac, { signal: ctl ? ctl.signal : undefined }); if (timer) clearTimeout(timer);
+      const j = res.ok ? await res.json() : null;
+      if (j && typeof j.latest === 'string' && /^\d{4}-\d\d-\d\d/.test(j.latest)) { if (store()) store().set('ovtRelease', { release: j.latest, at: Date.now() }); return j.latest; }
+    } catch (e) { /* offline or blocked: use what we knew */ }
+    return (saved && saved.release) || CFG.overture.fallback;
+  };
+  async function archive(force) {
+    if (OV.archive && !force) return OV.archive;
+    const rel = await W.overtureRelease(force);
+    OV.release = rel; OV.archive = MP.pmtiles.open(CFG.overture.url(rel), { fetch: W.fetchImpl });
+    return OV.archive;
+  }
+  /** the decompressed Overture MVT bytes for z14 tile (x, y), or null when Overture has no such tile (tests replace this) */
+  W.overtureTile = async function (x, y) {
+    let a = await archive(false);
+    try { return await a.tile(CFG.Z, x, y); }
+    catch (e) {
+      if (e && (e.status === 403 || e.status === 404)) { a = await archive(true); return a.tile(CFG.Z, x, y); }   // that release has been retired
+      throw e;
+    }
+  };
+
+  let binflight = 0; const bqueue = [];
+  function ensureBuildings(x, y, k) {
+    const t = W.tiles.get(k);
+    if (!t || t.state !== 'ok' || !t.data || !MP.pmtiles || CFG.overture.off) return;
+    if (t.bs === 'ok' || t.bs === 'empty' || t.bs === 'load') return;
+    if (t.bs === 'err' && Date.now() - t.bat < Math.min(300000, 20000 * Math.pow(2, (t.bfails || 1) - 1))) return;
+    t.bs = 'load'; bqueue.push([x, y, k]); bpump();
+  }
+  function bpump() {
+    while (binflight < CFG.overture.concurrency && bqueue.length) {
+      const [x, y, k] = bqueue.shift(), t = W.tiles.get(k);
+      if (!t || t.bs !== 'load') continue;
+      binflight++; loadBuildings(x, y, k);
+    }
+  }
+  /** Overture tiles already fetched are kept on the device (the next drive over the same ground costs nothing, offline included) */
+  async function remember(key, list) {
+    if (!MP.kv || !MP.store || W.fetchImpl) return;
+    try {
+      await MP.kv.set(key, { at: Date.now(), rel: OV.release, list });
+      const idx = (MP.store.get('ovtCells', []) || []).filter((q) => q !== key); idx.push(key);
+      while (idx.length > CFG.overture.keep) MP.kv.del(idx.shift());
+      MP.store.set('ovtCells', idx);
+    } catch (e) { /* storage full: just not cached */ }
+  }
+  async function loadBuildings(x, y, k) {
+    const t = W.tiles.get(k);
+    try {
+      const key = 'ovt:' + k, saved = MP.kv && !W.fetchImpl ? await MP.kv.get(key) : null;
+      let list;
+      if (saved && saved.list && Date.now() - saved.at < CFG.overture.ttl) list = saved.list;
+      else {
+        const bytes = await W.overtureTile(x, y);
+        list = bytes ? W.compactOverture(MP.mvt.decode(bytes, ['building', 'buildings'])) : [];
+        remember(key, list);
+      }
+      if (W.tiles.get(k) !== t || !t.data) return;          // evicted while we waited
+      if (list.length && list.length >= t.data.buildings.length) {
+        OV.status.buildings += list.length - t.data.buildings.length;
+        t.data.buildings = list; t.data.local = null; t.bs = 'ok'; OV.status.tiles++;
+        W.version++; emit('world', k);
+      } else t.bs = 'empty';                                // Overture has nothing better here: the OSM footprints stay
+      markB(true);
+    } catch (e) {
+      if (W.tiles.get(k) === t) { t.bs = 'err'; t.bat = Date.now(); t.bfails = (t.bfails || 0) + 1; }
+      markB(false, e && e.name === 'AbortError' ? 'buildings timed out' : (e && e.message) || 'failed');
+    } finally { binflight--; bpump(); }
+  }
+
+  /** probe for Trip → Health check: the archive header and one real tile */
+  W.selfTestBuildings = async function () {
+    const t0 = Date.now(), b = await W.overtureTile(4413, 6046);
+    if (!b || !b.length) throw new Error('no tile');
+    const n = W.compactOverture(MP.mvt.decode(b, ['building'])).length;
+    if (!n) throw new Error('tile has no buildings');
+    return { release: OV.release, buildings: n, ms: Date.now() - t0 };
+  };
 
   /** a tiny live probe for Trip → Health check */
   W.selfTest = async function () {

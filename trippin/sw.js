@@ -1,11 +1,11 @@
 /* Trippin' service worker: app shell offline; map tiles + fonts cached as you go. */
-const V = 'trippin-v6';
+const V = 'trippin-v7';
 // Map tiles and scenery tiles live in their own bounded caches. 'tiles' (v3 and older) was full of CARTO's
 // "API KEY REQUIRED" placeholder images, so it is retired by name and rebuilt from the new provider.
 const TILE_CACHE = 'tiles-esri-v1', SCENERY_CACHE = 'scenery-v1';
 const TILE_HOSTS = [[/^server\.arcgisonline\.com$/, TILE_CACHE, 900], [/^tiles\.openfreemap\.org$/, SCENERY_CACHE, 600]];
 const SHELL = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
-  'js/diag.js', 'js/core.js', 'js/sky.js', 'js/dtc.js', 'js/native.js', 'js/ui.js', 'js/engine.js', 'js/plan.js', 'js/intel.js', 'js/voice.js', 'js/future.js', 'js/pit.js', 'js/lens.js', 'js/mvt.js', 'js/path.js', 'js/world.js', 'js/street.js', 'js/terrain.js', 'js/freeroad.js', 'js/glscene.js', 'js/scene.js', 'js/vms.js', 'js/map.js', 'js/gps.js', 'js/obd.js', 'js/logger.js', 'js/gauges.js', 'js/drive.js', 'js/ahead.js', 'js/car.js', 'js/pilot.js', 'js/hud.js', 'js/recap.js', 'js/trip.js', 'js/app.js',
+  'js/diag.js', 'js/core.js', 'js/sky.js', 'js/dtc.js', 'js/native.js', 'js/ui.js', 'js/engine.js', 'js/plan.js', 'js/intel.js', 'js/learn.js', 'js/voice.js', 'js/future.js', 'js/pit.js', 'js/lens.js', 'js/mvt.js', 'js/pmtiles.js', 'js/path.js', 'js/world.js', 'js/street.js', 'js/terrain.js', 'js/freeroad.js', 'js/glscene.js', 'js/scene.js', 'js/vms.js', 'js/map.js', 'js/gps.js', 'js/obd.js', 'js/logger.js', 'js/gauges.js', 'js/drive.js', 'js/ahead.js', 'js/car.js', 'js/pilot.js', 'js/hud.js', 'js/recap.js', 'js/trip.js', 'js/app.js',
   'fonts/Barlow-400.woff2', 'fonts/Barlow-500.woff2', 'fonts/Barlow-600.woff2', 'fonts/BarlowCondensed-600.woff2', 'fonts/BarlowCondensed-700.woff2', 'fonts/BarlowCondensed-800.woff2', 'fonts/IBMPlexMono-500.woff2'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(V).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== V && k !== TILE_CACHE && k !== SCENERY_CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });

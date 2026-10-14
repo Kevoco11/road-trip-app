@@ -7,7 +7,7 @@ const path = require('path'), fs = require('fs');
 const { eq, near, MP } = require('./unit.js');
 const J = (f) => JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8'));
 const L = (f) => require(path.join(__dirname, '../js', f));
-L('native.js'); L('ui.js'); const E = L('engine.js'); L('plan.js'); const I = L('intel.js'); const V = L('voice.js'); const P = L('pilot.js'); const R = L('recap.js');
+L('native.js'); L('ui.js'); const E = L('engine.js'); L('plan.js'); const I = L('intel.js'); const LEARN = L('learn.js'); const V = L('voice.js'); const P = L('pilot.js'); const R = L('recap.js');
 const S = MP.S;
 
 const tests = [];
@@ -381,6 +381,74 @@ t('re-route: when the service is unreachable it backs off, says so, and nothing 
   eq(I.autoReroute(S.d, Date.now() + 30000), true, 'tries again later');
   await new Promise((res) => setTimeout(res, 400));
   E.endTrip(); I.fetchImpl = null;
+});
+
+group('learning from your own drives (learn.js): the clock says what these roads take YOU at this hour');
+// A drive over the real Sterling Heights route fixture: 12 m/s, a two-minute crawl through 1.0–1.4 km (a jam), a 200 s fuel stop at 2.0 km.
+const stRoute = () => MP.Route.fromOSRM(J('osrm-sterling.json'), ['Pemberton Dr', 'Van Dyke Ave']);
+function driveOver(route, startMs, o) {
+  o = o || {}; const crumbs = [], stops = []; let a = 0, t = 0, parked = 0;
+  while (a < route.total - 1) {
+    const jam = a > 1000 && a < 1400, v = jam ? 2.5 : 12;
+    if (!parked && a >= 2000) { parked = 1; const p = route.pointAt(a); for (let k = 0; k < 10; k++) { crumbs.push([Math.round((startMs + t * 1000) / 1000), p.lat, p.lng, 0, 160, Math.round(a)]); t += 20; } stops.push({ start: startMs + (t - 200) * 1000, end: startMs + t * 1000, sec: 200 }); }
+    a += v * 5; t += 5; const p = route.pointAt(Math.min(a, route.total));
+    crumbs.push([Math.round((startMs + t * 1000) / 1000), p.lat, p.lng, v, 160, Math.round(Math.min(a, route.total))]);
+  }
+  return { id: o.id || 'drv' + startMs, startedAt: startMs, endedAt: startMs + t * 1000, crumbs, stops, distM: route.total, movingSec: t - 200, routeName: 'test' };
+}
+const WED_7_20 = new Date(2026, 9, 14, 7, 20).getTime();
+t('a recorded drive becomes seconds per 100 m: the jam is slow, the fuel stop is not counted as road time', () => {
+  LEARN.profiles = [];
+  const r = stRoute(), trip = driveOver(r, WED_7_20), p = LEARN.record(trip);
+  ok(p && p.cells.length >= r.total / 100 - 3, 'cells ' + (p && p.cells.length));
+  const secs = p.cells.map((c) => c[1]), tot = secs.reduce((a, b) => a + b, 0), actual = (trip.endedAt - trip.startedAt) / 1000 - 200;
+  near(tot, actual, 25, 'sum of the 100 m times equals the drive time without the break (' + Math.round(tot) + ' vs ' + Math.round(actual) + ')');
+  ok(Math.max(...secs) > 30 && Math.min(...secs) < 10, 'slow cells in the jam, fast ones elsewhere');
+  eq(p.kind, 0, 'a Wednesday'); near(p.hour, 7.33, 0.01);
+  eq(LEARN.record({ id: 'tiny', startedAt: WED_7_20, crumbs: trip.crumbs.slice(0, 4) }), null, 'too short to learn from');
+});
+t('predicting the same route at the same hour reproduces the drive; free-flow is kept alongside', () => {
+  const r = stRoute(), free = r.duration;
+  const learned = LEARN.apply(r, WED_7_20 + 86400000 - 20 * 60000 + 14 * 60000);   // the next day, 7:14
+  ok(learned && learned.coverage > 0.9 && learned.n === 1, JSON.stringify(learned));
+  const trip = driveOver(stRoute(), WED_7_20), actual = (trip.endedAt - trip.startedAt) / 1000 - 200;
+  near(r.duration, actual, actual * 0.12, 'learned ' + Math.round(r.duration) + ' s vs the drive ' + Math.round(actual) + ' s'); ok(r.duration > free * 1.1, 'longer than free-flow (' + Math.round(free) + ' s): the jam is in it');
+  eq(r.freeDuration, free); eq(r.toJSON().duration, free, 'the cached route keeps the routing service’s free-flow time');
+  near(r.timeAt(r.total), r.duration, 1e-6); ok(r.timeAt(1200) - r.timeAt(1000) > 3 * (r.freeTimeAt(1200) - r.freeTimeAt(1000)), 'the jam stretch is slow in the time map');
+  near(r.distAtTime(r.timeAt(1750)), 1750, 2, 'distAtTime inverts timeAt');
+  eq(MP.learn.basis(r).kind, 'learned'); ok(/1 drive/.test(MP.learn.basis(r).text), MP.learn.basis(r).text);
+  // the ETA arithmetic everywhere runs on it
+  near(MP.eta.compute(r, 0, 0, 1, 0).driveSec, r.duration, 1e-6); near(MP.eta.compute(r, 1500, 0, 1, 0).driveSec, r.duration - r.timeAt(1500), 1e-6);
+});
+t('no match → nothing changes: other direction, weekend, middle of the night, or a route the drives never covered', () => {
+  const fwd = stRoute(), rev = new MP.Route({ pts: (() => { const n = fwd.indexAt(2400) + 1, o = new Float64Array(2 * n); for (let i = 0; i < n; i++) { o[2 * i] = fwd.pts[2 * (n - 1 - i)]; o[2 * i + 1] = fwd.pts[2 * (n - 1 - i) + 1]; } return o; })(), duration: 400, steps: [], name: 'reverse' });
+  eq(LEARN.apply(rev, WED_7_20), null, 'the opposite direction is another road'); eq(rev.duration, 400); eq(rev.learned, null);
+  const r = stRoute(), free = r.duration;
+  eq(LEARN.apply(r, new Date(2026, 9, 17, 7, 20).getTime()), null, 'a Saturday is not a weekday'); eq(r.duration, free);
+  eq(LEARN.apply(r, new Date(2026, 9, 14, 3, 0).getTime()), null, '3 AM is not 7:20 AM'); eq(r.duration, free);
+  const far = MP.Route.fromOSRM(J('osrm-short.json'), ['Toledo, OH', 'Maumee, OH']), fd = far.duration;
+  eq(LEARN.apply(far, WED_7_20), null, 'Toledo was never driven'); eq(far.duration, fd);
+  // applying again where it matched, then where it does not, restores free-flow
+  const r2 = stRoute(); LEARN.apply(r2, WED_7_20); ok(r2.learned); LEARN.apply(r2, new Date(2026, 9, 17, 7, 20).getTime()); eq(r2.learned, null); eq(r2.duration, free);
+});
+t('a route that overlaps only partly: known stretches use the drives, the rest the free-flow time scaled by how those compared', () => {
+  const r = stRoute();
+  // a route whose first 1.2 km is the driven road and then goes somewhere else (north-east, never driven)
+  const pts = []; const cut = r.indexAt(1200); for (let i = 0; i <= cut; i++) pts.push(r.pts[2 * i], r.pts[2 * i + 1]);
+  let lat = pts[pts.length - 2], lng = pts[pts.length - 1]; for (let k = 0; k < 20; k++) { const q = MP.geo.destination(lat, lng, 60, 100); lat = q.lat; lng = q.lng; pts.push(lat, lng); }
+  const part = new MP.Route({ pts: Float64Array.from(pts), duration: 300, steps: [], name: 'partial' });
+  const res = LEARN.apply(part, WED_7_20);
+  ok(res && res.coverage > 0.35 && res.coverage < 0.75, 'coverage ' + (res && res.coverage));
+  ok(res.ratio > 1, 'the known stretch includes the jam, so it was slower than free-flow: ' + res.ratio.toFixed(2));
+  ok(part.duration > 300, 'longer than free-flow');
+});
+t('drives already saved on the phone are learned from once, at start-up', async () => {
+  LEARN.profiles = []; MP.store.set('learnBackfilled', false);
+  const trip = driveOver(stRoute(), WED_7_20 - 7 * 86400000, { id: 'old1' });
+  await MP.kv.set('trip:old1', trip); MP.store.set('trips', [{ id: 'old1', name: 'x', startedAt: trip.startedAt, endedAt: trip.endedAt, distM: trip.distM }]);
+  ok(await LEARN.backfill() >= 1); ok(LEARN.profiles.some((p) => p.id === 'old1'), 'the saved drive was learned'); eq(await LEARN.backfill(), 0, 'not again');
+  const r = stRoute(); ok(LEARN.apply(r, WED_7_20), 'a drive from last Wednesday counts');
+  LEARN.profiles = [];
 });
 
 (async () => {

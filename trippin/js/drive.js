@@ -218,10 +218,17 @@
   };
 
   /* ---------------------------------------------------------- the scene */
-  /** metres travelled since the last GPS fix (fixes arrive about once a second; without this the road advances in jerks) */
+  /** Metres the car has travelled since the position of the newest fix: the time since that fix (they arrive about once a
+   *  second; without this the road advances in jerks) plus the `lead` the pipeline costs — a fix describes where the car WAS
+   *  (a satellite epoch, the receiver's filter, delivery to the page), so the windshield is drawn where it is NOW. Constant
+   *  acceleration over that time, never reversing: a braking car stops at v²/2a instead of rolling on past the line. */
   function coast(room) {
-    const g = S.gps, v = S.d.speedMps || 0, age = (Date.now() - (g.ts || 0)) / 1000;
-    return S.d.stale || v < 1 || age <= 0 ? 0 : Math.max(0, Math.min(room, v * Math.min(age, 1.5)));
+    const g = S.gps, v = S.d.speedMps || 0;
+    if (S.d.stale || v < 1) return 0;
+    const age = Math.max(0, (Date.now() - (g.ts || 0)) / 1000), lead = S.prefs.lead != null ? util.clamp(S.prefs.lead, 0, 1.5) : 0.4;
+    const t = Math.min(age, 1.5) + lead, a = util.clamp(g.accel || 0, -6, 3);
+    const te = a < 0 ? Math.min(t, v / -a) : t;
+    return Math.max(0, Math.min(room, v * te + 0.5 * a * te * te));
   }
   function sceneState() {
     const r = S.route, d = S.d, hy = D.vis ? D.vis.hy : 220;
@@ -362,6 +369,11 @@
     const r = d.beyond ? null : S.route;   // driven on past the destination: the cockpit reads as a free drive
     D.rebuildF(false);
     ui.setText(nodes.speed, units.speed(d.speedMps)); ui.setText(nodes.speedU, units.speedUnit());
+    // the posted limit of the road under the car, from OpenStreetMap's maxspeed tag: shown only where it is mapped (never guessed)
+    const lim = MP.street && MP.street.limitAt && S.trip && S.gps.lat != null && !d.stale ? MP.street.limitAt(S.gps.lat, S.gps.lng, S.gps.heading) : null;
+    d.limit = lim != null ? Math.round(units.speed(lim / 3.6) / 5) * 5 : null;
+    if (nodes.limit.hidden !== (d.limit == null)) nodes.limit.hidden = d.limit == null;
+    if (d.limit != null) ui.setText(nodes.limit.querySelector('b'), d.limit);
     nodes.speedo.classList.toggle('over', d.limit != null && units.speed(d.speedMps) > d.limit + 5);
     nodes.tGps.classList.toggle('lit', S.gps.lock && !d.stale); nodes.tGps.classList.toggle('warn', !!S.trip && !(S.gps.lock && !d.stale));
     nodes.tObd.classList.toggle('lit', !!S.car.connected);

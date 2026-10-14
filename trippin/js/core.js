@@ -396,8 +396,28 @@
         if (tEnd > 0) for (let i = 0; i < tArr.length; i++) tArr[i] = (tArr[i] / tEnd) * this.duration;
       } else { dArr.push(this.total); tArr.push(this.duration); }
       this._td = dArr; this._tt = tArr;
+      // the routing service's own (free-flow) time map is kept: setTimeline() swaps in one measured from the driver's own history
+      this._fd = dArr; this._ft = tArr; this.freeDuration = this.duration; this.learned = null;
     }
-    /** free-flow planned seconds from start to distance d (meters along route) */
+    /** replace the time map by one measured from past drives: secs[i] = seconds for the i-th `step` metres */
+    setTimeline(secs, step) {
+      const D = [0], T = [0]; let t = 0;
+      for (let i = 0; i < secs.length; i++) { t += Math.max(0, secs[i]); D.push(Math.min(this.total, (i + 1) * step)); T.push(t); }
+      this._td = D; this._tt = T; this.duration = t;
+    }
+    /** back to the routing service's free-flow time map */
+    clearTimeline() { this._td = this._fd; this._tt = this._ft; this.duration = this.freeDuration; this.learned = null; }
+    /** free-flow seconds to distance d, whatever time map is active (what the routing service says, with no history) */
+    freeTimeAt(d) {
+      const D = this._fd, T = this._ft;
+      if (d <= 0) return 0;
+      if (d >= D[D.length - 1]) return T[T.length - 1];
+      let lo = 0, hi = D.length - 1;
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (D[m] <= d) lo = m; else hi = m; }
+      const span = D[hi] - D[lo];
+      return T[lo] + (span > 0 ? ((d - D[lo]) / span) * (T[hi] - T[lo]) : 0);
+    }
+    /** planned seconds from start to distance d (meters along route): the learned time map when one is applied, else free-flow */
     timeAt(d) {
       const D = this._td, T = this._tt;
       if (d <= 0) return 0;
@@ -481,7 +501,7 @@
     /** compact JSON for caching */
     toJSON() {
       return {
-        v: 1, pl: polyline.encode(this.pts, 6), duration: this.duration, steps: this.steps,
+        v: 1, pl: polyline.encode(this.pts, 6), duration: this.freeDuration || this.duration, steps: this.steps,
         segments: this.segments, waypoints: this.waypoints, name: this.name, approx: this.approx, source: this.source,
       };
     }

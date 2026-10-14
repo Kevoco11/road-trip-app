@@ -96,7 +96,7 @@ void main(){
       gl.bindVertexArray(null); return { vao, buf: b, n };
     }
     /** the world-tile set a chunk was built with vs. what is available now (+ whether elevation has arrived since) */
-    _sigNow(c, elevAt) { const w = MP.world, have = c.need.filter((k) => { const t = w.tiles.get(k); return t && t.state === 'ok'; }); const st = MP.street && c.needF ? MP.street.have(c.needF) : []; return have.join(',') + '|' + st.join(',') + '|' + ((elevAt && elevAt(0) != null) ? 1 : 0); }
+    _sigNow(c, elevAt) { const w = MP.world, have = c.need.map((k) => w.tileSig(k)).filter(Boolean); const st = MP.street && c.needF ? MP.street.have(c.needF) : []; return have.join(',') + '|' + st.join(',') + '|' + ((elevAt && elevAt(0) != null) ? 1 : 0); }
 
     /** start building chunk k as a time-sliced job (only one runs at a time) */
     _start(s, k, ctx) {
@@ -188,8 +188,9 @@ void main(){
       } else this._lastT = 0;
       const elevRaw = (a) => { const e = cam.elevAt ? cam.elevAt(Math.max(0, Math.min(route.total, a))) : null; return e == null ? 0 : e; };
 
-      // camera: a chase cam 11 m behind the car, in its lane, 5.4 m up
-      const camBack = cam.camBack != null ? cam.camBack : 9, camH = cam.camH != null ? cam.camH : 3.2, A = Math.max(0, cam.along - camBack);
+      // camera: a chase cam 5 m behind the car (the phone is at the driver's seat, not the bumper), in its lane, 3.2 m up. It was 9 m:
+      // every junction then slid out of sight about half a second after the car had really passed it
+      const camBack = cam.camBack != null ? cam.camBack : 5, camH = cam.camH != null ? cam.camH : 3.2, A = Math.max(0, cam.along - camBack);
       const kc = Math.floor(A / CH), cc = s.chunks.get(kc);
       const wantLat = T().camOffset(cc, A);
       const own = cam.owner || this;   // lane offset eases per Scene (the Drive view and the Future-You thumbnail must not fight over it)
@@ -199,7 +200,8 @@ void main(){
       // scenery tiles: under the car and ahead
       const pts = []; for (const d of [0, 500, 1000, 1600, 2300]) { const pp = s.path.pose(Math.min(route.total, A + d)); pts.push({ lat: pp.y / route.ky, lng: pp.x / route.kx }); }
       if (!cam.noWorld && MP.world) MP.world.want(pts, !!cam.snap);
-      if (!cam.noWorld && MP.street) MP.street.want(pts, !!cam.snap);
+      // street cells (signals, lanes, limits) come from a slower service: ask further ahead so they are here before the car is
+      if (!cam.noWorld && MP.street) { const far = pts.slice(); for (const d of [3600, 5200, 7500]) { const pp = s.path.pose(Math.min(route.total, A + d)); far.push({ lat: pp.y / route.ky, lng: pp.x / route.kx }); } MP.street.want(far, !!cam.snap); }
 
       // which chunks are in view; build the missing / stale ones, nearest first, a few milliseconds per frame
       // (a jump — first frame, time-travel scrub — builds the two nearest synchronously so the view is never empty)

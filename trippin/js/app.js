@@ -95,6 +95,7 @@
     applyTheme(S.prefs.theme === 'auto' ? (hr >= 7 && hr < 19 ? 'atlas' : 'night') : S.prefs.theme);
 
     MP.intel.start();
+    if (MP.learn) { try { await MP.learn.backfill(); } catch (e) { /* history is a bonus */ } }   // your saved drives → what these roads take you
     await loadRoute();
     const resumed = await E.restoreTrip();
     if (resumed) { MP.gps.start(); MP.drive.setFollow(true); ui.toast('Resumed your trip in progress', 'ok'); MP.bus.emit('trip', 'resume'); }
