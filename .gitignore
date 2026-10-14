@@ -7,3 +7,4 @@ android/local.properties
 *.apk
 node_modules/
 dist/
+trippin/js/local-keys.js

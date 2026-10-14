@@ -12,7 +12,7 @@
   const MP = root.MP || (root.MP = {});
   const T = (MP.traffic = {});
   const S = () => (MP.engine && MP.engine.S) || {};
-  const key = () => { try { return (S().prefs && S().prefs.tomtomKey) || ''; } catch (e) { return ''; } };
+  const key = () => { try { return (S().prefs && S().prefs.tomtomKey) || (MP.localKeys && MP.localKeys.tomtom) || ''; } catch (e) { return ''; } };
   T.enabled = () => !!key();
 
   /** up to ~120 evenly spaced points along the route */
