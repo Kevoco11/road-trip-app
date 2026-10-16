@@ -453,6 +453,65 @@ t('real chunk: more footprints in → more buildings drawn, deterministic', asyn
   WORLD.reset(); WORLD.fetchImpl = null;
 });
 
+group('Overture land cover and trees (world.js + terrain.js)');
+// fixtures/overture-base-13-2206-3023.mvt.gz is a REAL tile of Overture's base theme (Sterling Heights): satellite land cover + mapped trees.
+const BASE_BYTES = () => new Uint8Array(zlib.gunzipSync(F('overture-base-13-2206-3023.mvt.gz')));
+t('compactCover: real tile → forest/crop/urban polygons, individually mapped trees and tree rows', () => {
+  const c = WORLD.compactCover(MP.mvt.decode(BASE_BYTES(), ['land_cover', 'land']));
+  const kinds = new Set(c.covers.map((x) => x.cls));
+  ok(kinds.has('forest') && kinds.has('urban'), 'cover classes ' + [...kinds]);
+  ok(c.trees.length / 2 > 200, 'mapped trees: ' + c.trees.length / 2);
+  for (let i = 0; i < c.trees.length; i++) ok(c.trees[i] >= 0 && c.trees[i] < 4096, 'tree inside its tile');
+  ok(c.rows.length >= 1 && c.rows[0].pts.length >= 4, 'tree rows ' + c.rows.length);
+  const forest = c.covers.find((x) => x.cls === 'forest'); eq(forest.kind, WORLD.KIND.wood); ok(forest.p > 2 && forest.p < 3, 'forest paints over residential land use (p=1) but under OSM wood/parks');
+  const fake = WORLD.compactCover({ land_cover: { extent: 4096, features: [{ props: { subtype: 'glacier' }, type: 3, polys: [{ outer: [0, 0, 9, 0, 9, 9, 0, 9, 0, 0], holes: [] }] }] } });
+  eq(fake.covers.length, 0, 'an unknown class draws nothing');
+});
+t('world: a loaded tile also loads its z13 land-cover parent, once, and the chunk signature records it', async () => {
+  WORLD.cfg.overture.off = false; WORLD.cfg.overture.coverOff = false; WORLD.reset(); WORLD.fetchImpl = tileFetch(null);
+  let calls = 0; const realB = WORLD.overtureTile, realC = WORLD.coverTile;
+  WORLD.overtureTile = async () => null; WORLD.coverTile = async (x, y) => { calls++; eq([x, y].join('/'), '2206/3023', 'the z14 tile 4413/6046 sits in z13 tile 2206/3023'); return BASE_BYTES(); };
+  const r = sterling(); WORLD.want([r.pointAt(0)], true); await wait(150);
+  eq(calls, 1, 'one land-cover request for the parent tile'); eq(WORLD.cover.status.state, 'ok');
+  const q = WORLD.query({ kx: r.kx, ky: r.ky }, [r.X[0] - 600, r.Y[0] - 600, r.X[0] + 600, r.Y[0] + 600]);
+  ok(q.trees.length >= 1 && q.trees[0].length > 400, 'trees served to the builder'); ok(q.have.some((s) => /\+c$|\+o\+c$/.test(s)), 'signature has the cover marker: ' + q.have);
+  ok(q.covers.some((c) => c.cls === 'forest'), 'forest cover is part of the land cover'); for (let i = 1; i < q.covers.length; i++) ok(q.covers[i - 1].p <= q.covers[i].p, 'covers stay sorted by paint priority');
+  // the archive is down: the OSM scenery is unaffected and the tile is not hammered
+  WORLD.reset(); calls = 0; WORLD.coverTile = async () => { calls++; throw new Error('base theme down'); };
+  WORLD.want([r.pointAt(0)], true); await wait(150); eq(WORLD.tiles.get('4413/6046').state, 'ok', 'OSM tile loaded regardless'); eq(WORLD.cover.status.state, 'error'); eq(calls, 1);
+  WORLD.want([r.pointAt(0)], true); eq(calls, 1, 'back-off: not asked again straight away');
+  WORLD.overtureTile = realB; WORLD.coverTile = realC; WORLD.cfg.overture.off = true; WORLD.reset(); WORLD.fetchImpl = null;
+});
+t('real chunk: mapped trees and satellite forest add trees; far trees are cheaper than near ones; deterministic', async () => {
+  WORLD.cfg.overture.off = false; WORLD.reset(); WORLD.fetchImpl = tileFetch(null);
+  const realB = WORLD.overtureTile, realC = WORLD.coverTile; WORLD.overtureTile = async () => null; WORLD.coverTile = async () => BASE_BYTES();
+  const r = sterling(); WORLD.want([r.pointAt(0)], true); await wait(150);
+  const withCover = TER.buildChunk(ctxFor(r), 4), again = TER.buildChunk(ctxFor(r), 4);
+  WORLD.cfg.overture.coverOff = true; WORLD.reset(); WORLD.fetchImpl = tileFetch(null); WORLD.want([r.pointAt(0)], true); await wait(150);
+  const without = TER.buildChunk(ctxFor(r), 4);
+  ok(withCover.stats.mapped > 20, 'mapped street trees placed: ' + withCover.stats.mapped); ok(withCover.stats.trees > without.stats.trees, 'trees ' + without.stats.trees + ' → ' + withCover.stats.trees);
+  eq(withCover.detail.n, again.detail.n, 'deterministic'); ok(withCover.sig !== without.sig, 'signature differs with the cover source');
+  ok(withCover.detail.n / 3 < 120000, 'detail budget holds: ' + withCover.detail.n / 3 + ' triangles');
+  WORLD.overtureTile = realB; WORLD.coverTile = realC; WORLD.cfg.overture.off = true; WORLD.cfg.overture.coverOff = false; WORLD.reset(); WORLD.fetchImpl = null;
+});
+t('materials: asphalt, walls, foliage and guide chevrons carry their tags; free drives get no chevrons', async () => {
+  WORLD.reset(); WORLD.fetchImpl = tileFetch(null);
+  const r = sterling(); WORLD.want([r.pointAt(0)], true); await wait(80);
+  const tags = (m) => { const s = new Set(); for (let i = 0; i < m.n; i++) s.add(m.col[i] >>> 24); return s; };
+  const c = TER.buildChunk(ctxFor(r), 1), bt = tags(c.base), dt = tags(c.detail);
+  ok(bt.has(30) && bt.has(192) && bt.has(255), 'base: asphalt 30, guide 192, paint 255 → ' + [...bt]); ok(dt.has(64), 'detail: building walls 64 → ' + [...dt]);
+  const route = ctxFor(r); route.route.free = true; const f = TER.buildChunk(route, 1); ok(!tags(f.base).has(192), 'no chevrons without a destination');
+});
+t('avatar: a closed generic sedan, paint colour from the setting, brake lights only when braking', () => {
+  const AV = L('avatar.js'); const a = AV.build('pearl', false), b = AV.build('pearl', true), g = AV.build('red', false);
+  ok(a.length % 27 === 0 && a.length > 600, 'whole triangles: ' + a.length / 27); eq(a.length, b.length);
+  const alphas = (v) => { const s = new Set(); for (let i = 6; i < v.length; i += 9) s.add(Math.round(v[i] * 255)); return s; };
+  ok(!alphas(a).has(224) && alphas(b).has(224), 'the lit tail-light tag exists only while braking'); ok(alphas(a).has(128) && alphas(a).has(160), 'headlights and glossy paint');
+  let mx = [1e9, 1e9, 1e9], Mx = [-1e9, -1e9, -1e9]; for (let i = 0; i < a.length; i += 9) for (let k = 0; k < 3; k++) { mx[k] = Math.min(mx[k], a[i + k]); Mx[k] = Math.max(Mx[k], a[i + k]); }
+  near(Mx[1] - mx[1], 4.61, 0.05, 'about 4.6 m long'); near(Mx[0] - mx[0], 1.9, 0.12, 'about 1.9 m wide'); ok(mx[2] >= 0 && Mx[2] < 1.6, 'sits on the ground, under 1.6 m');
+  ok(a[3] !== g[3] || a[4] !== g[4], 'paint changes the colour');
+});
+
 group('lanes and speed limits (real OpenStreetMap ways)');
 // fixtures/overpass-ways-13-2206-3023.json is the REAL Overpass reply for the lanes/maxspeed query of the same Sterling Heights cell.
 const wayEls = () => JSON.parse(F('overpass-ways-13-2206-3023.json').toString()).elements;

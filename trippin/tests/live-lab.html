@@ -1,0 +1,37 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>live lab</title>
+<!-- Test bench only (never shipped): the 3D windshield on ANY real route with LIVE data (OSRM, OpenFreeMap, Overture, Overpass).
+     ?from=lat,lng&to=lat,lng, then: await window.shot({along, h, m, wx, signs, cam}) and screenshot #c. Needs network. -->
+<style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
+body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block}</style></head><body><canvas id="c"></canvas>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/avatar.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
+<script>
+(async () => {
+  const qs = new URLSearchParams(location.search), ll = (s, d) => (s || d).split(',').map(Number);
+  const f = ll(qs.get('from'), '42.5803,-83.0302'), t = ll(qs.get('to'), '42.9226,-83.0447');
+  const j = await (await fetch('https://router.project-osrm.org/route/v1/driving/' + f[1] + ',' + f[0] + ';' + t[1] + ',' + t[0] + '?overview=full&geometries=polyline6&steps=true')).json();
+  const route = MP.Route.fromOSRM(j, ['Start', 'End']);
+  const cv = document.getElementById('c'), sc = new MP.Scene(cv);
+  const W = +(qs.get('w') || 400), H = +(qs.get('h') || 760); sc.resize(W, H, 1); cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  const elev = (a) => 200 + 9 * Math.sin(a / 700);
+  window.route = route; window.scene = sc;
+  window.shot = async (o) => {
+    o = o || {};
+    const along = o.along || 0, p = route.pointAt(along), ms = Date.UTC(2026, 9, 12, (o.h == null ? 14 : o.h) + 4, o.m || 0);
+    const wx = o.wx || { cloud: 0.3 };
+    const st = () => ({ ms, lat: p.lat, lng: p.lng, heading: p.bearing, along, route, speed: o.speed != null ? o.speed : 12, wx, elevAt: o.flat ? null : elev, signs: o.signs || [], hy: o.hy || 250, brake: o.brake, chase: o.chase !== false, carPaint: o.paint });
+    sc.noWorld = !!o.noWorld; sc._lastAlong = null; sc.camOverride = o.cam || null;
+    MP.world.want([p], true); MP.street.want([p], true);
+    for (let i = 0; i < 160; i++) {
+      sc.render(st(), 0.033);
+      const gw = MP.glworld, s = gw.states.get(route), stale = s && [...s.chunks.values()].some((c) => gw._sigNow(c, st().elevAt) !== c.sig);
+      const ws = MP.world.status, pend = [...MP.world.tiles.values()].some((x) => x.state === 'load' || (x.state === 'ok' && x.bs === 'load')) || [...MP.world.cover.tiles.values()].some((x) => x.state === 'load');
+      if (!pend && s && !s.job && !stale && s.chunks.size >= 3 && i > 10) break;
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    sc.render(st(), 0.033);
+    const gw = MP.glworld, s = gw.states.get(route);
+    return { ok: gw.ok, err: gw.lastErr, stats: gw.stats, along: Math.round(along), total: Math.round(route.total), cover: MP.world.cover.status, ov: MP.world.overture.status, chunks: s ? [...s.chunks.values()].map((c) => ({ k: c.k, b: c.stats.buildings, t: c.stats.trees, m: c.stats.mapped || 0, ms: c.stats.ms })) : [] };
+  };
+  window.ready = true;
+})();
+</script></body></html>

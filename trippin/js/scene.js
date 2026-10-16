@@ -20,6 +20,8 @@
   const rgb = sky.rgb, mix = sky.mix;
   const D2R = Math.PI / 180;
 
+  /** the chase view: the camera rides behind and above the car, which is drawn on the road (the default view; "cockpit" is the windscreen view) */
+  const CHASE = { h: 4.1, b: 12.5, scale: 1.1 };
   function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
 
   class Scene {
@@ -63,10 +65,11 @@
       let glr = null, hdg, light = null;
       const fogD = util.clamp(1250 * (1 - fogAmt * 0.88) * (1 - gray * 0.3), 160, 1400);
       if (route && !route.approx && MP.glworld && !this.noGL) {
-        light = this._light(sun, pal, gray, fogAmt, hor, fogD);
+        light = this._light(sun, pal, gray, fogAmt, hor, fogD); light.wet = wet;
         const jump = this._lastAlong == null || Math.abs((st.along || 0) - this._lastAlong) > 250 || this._lastRoute !== route;
         this._lastAlong = st.along || 0; this._lastRoute = route;
-        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb && st.live !== false, camH: this.camOverride ? this.camOverride.h : undefined, camBack: this.camOverride ? this.camOverride.b : undefined /* camOverride: test-bench hook */ }, dt);
+        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, t: this.t, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb && st.live !== false, camH: this.camOverride ? this.camOverride.h : st.chase ? CHASE.h : undefined, camBack: this.camOverride ? this.camOverride.b : st.chase ? CHASE.b : undefined /* camOverride: test-bench hook */,
+          car: st.chase && !this.isThumb ? { paint: st.carPaint, brake: !!st.brake, scale: CHASE.scale } : null }, dt);
       }
       hdg = glr ? glr.heading : (st.heading || 0);
 
@@ -156,7 +159,7 @@
 
       // ---- ground
       if (glr) {
-        this._groundBase(ctx, W, H, hy, f, hor, light);
+        this._groundBase(ctx, W, H, hy, f, hor, light, glr.camH);
         ctx.drawImage(glr.canvas, 0, 0, W, H);
         const hz = ctx.createLinearGradient(0, hy - 16, 0, hy + 46);   // haze where land meets sky
         hz.addColorStop(0, rgb(hor, 0)); hz.addColorStop(0.35, rgb(hor, 0.55)); hz.addColorStop(1, rgb(hor, 0));
@@ -230,13 +233,16 @@
       };
     }
     /** below the horizon: a flat-ground gradient lit exactly like the terrain shader, so nothing shows a seam at the edge of the mesh */
-    _groundBase(ctx, W, H, hy, f, hor, l) {
+    _groundBase(ctx, W, H, hy, f, hor, l, camHeight) {
       if (!l) { ctx.fillStyle = rgb(hor); ctx.fillRect(0, hy, W, H - hy); return; }
-      const camH = 3.2, g = ctx.createLinearGradient(0, hy, 0, H);   // = GLWorld's default camera height
+      const camH = camHeight || 3.2, g = ctx.createLinearGradient(0, hy, 0, H);   // = the camera height the 3D view was drawn with (3.2 m in the cockpit view)
       for (const z of [6000, 2500, 1200, 600, 300, 150, 75, 38, 18, 9]) {
         const y = hy + (camH * f) / z, t = (y - hy) / (H - hy); if (t >= 1) continue;
         const dist = Math.hypot(z, camH), ndv = camH / dist, hl = l.head * Math.exp(-dist / 42) * (0.3 + 0.7 * ndv), fog = 1 - Math.exp(-dist / l.fogD);
-        const c = [0, 1, 2].map((i) => { const lit = l.alb[i] * (l.amb[i] + l.sunCol[i] * l.sunWorld[2] + l.headCol[i] * hl); return (lit + (l.fogCol[i] - lit) * fog) * 255; });
+        // the same lighting + tone curve as the shader's flat, up-facing ground, so the far ground meets the mesh without a seam
+        const lit3 = [0, 1, 2].map((i) => l.alb[i] * (l.amb[i] + l.fogCol[i] * 0.14 + l.sunCol[i] * Math.max(0, l.sunWorld[2]) + l.headCol[i] * hl) * 1.22);
+        const tm = lit3.map((v) => v * (1 + v / 2.6) / (1 + v)), lum = 0.299 * tm[0] + 0.587 * tm[1] + 0.114 * tm[2], tc = tm.map((v) => Math.min(1, Math.max(0, lum + (v - lum) * 1.12)));
+        const c = [0, 1, 2].map((i) => (tc[i] + (l.fogCol[i] - tc[i]) * fog) * 255);
         g.addColorStop(Math.max(0, Math.min(1, t)), 'rgb(' + c.map((v) => Math.round(util.clamp(v, 0, 255))).join(',') + ')');
       }
       ctx.fillStyle = g; ctx.fillRect(0, hy, W, H - hy);

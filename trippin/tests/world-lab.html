@@ -3,7 +3,7 @@
      nothing here is shipped. Drive it from Playwright: await window.shot({along, h, m, wx, signs}) then screenshot #c. -->
 <style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
 body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block}</style></head><body><canvas id="c"></canvas>
-<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/avatar.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
 <script>
 (async () => {
   const route = MP.Route.fromOSRM(await (await fetch('fixtures/osrm-sterling.json')).json(), ['Start', 'End']);

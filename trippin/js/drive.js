@@ -78,8 +78,9 @@
     nodes.follow = h('button.icon-btn.on', { 'aria-label': 'Follow', hidden: true, onclick: () => D.setFollow(!mv.follow) }, icon('crosshair'));
     nodes.north = h('button.icon-btn', { 'aria-label': 'North up', hidden: true, onclick: () => { mv.northUp = !mv.northUp; nodes.north.classList.toggle('on', mv.northUp); D.updateCamera(true); } }, icon('compass'));
     nodes.viewBtn = h('button.icon-btn', { 'aria-label': 'Switch view', onclick: () => D.setMode(mode === 'view' ? 'map' : 'view') }, icon('layers'));
+    nodes.chase = h('button.icon-btn' + (S.prefs.view !== 'cockpit' ? '.on' : ''), { 'aria-label': 'Chase view', onclick: () => { const on = S.prefs.view === 'cockpit'; E.setPref('view', on ? 'chase' : 'cockpit'); nodes.chase.classList.toggle('on', on); ui.toast(on ? 'Chase view: your car on the road' : 'Windscreen view', 'info'); } }, icon('chase'));
     nodes.hud = h('button.icon-btn', { 'aria-label': 'HUD', onclick: () => (MP.hud ? MP.hud.open() : ui.toast('HUD coming up', 'info')) }, icon('hud'));
-    nodes.tools = h('aside.tools', nodes.viewBtn, nodes.hud, nodes.follow, nodes.north);
+    nodes.tools = h('aside.tools', nodes.viewBtn, nodes.chase, nodes.hud, nodes.follow, nodes.north);
 
     nodes.speed = h('div.num', '0'); nodes.speedU = h('div.u', 'mph');
     nodes.limit = h('div.limit', { hidden: true }, h('small', 'SPEED'), h('small', 'LIMIT'), h('b', '—'));
@@ -252,7 +253,12 @@
     const pt = r.pointAt(along);
     return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy, noWorld: S.prefs.scenery === false, live: !!S.trip || preview != null };
   }
-  D.drawScene = function (dt) { const st = sceneState(); scene.render(st, dt); D._sceneState = st; };
+  /** what the camera and the car avatar need beyond the road itself: the view (chase is the default), brake lights from the GPS's own deceleration, paint */
+  function viewExtras() {
+    const g = S.gps, v = S.d.speedMps || 0;
+    return { chase: S.prefs.view !== 'cockpit', brake: !S.d.stale && v > 1.5 && (g.accel || 0) < -1.2, carPaint: S.prefs.carPaint || 'pearl' };
+  }
+  D.drawScene = function (dt) { const st = Object.assign(sceneState(), viewExtras()); scene.render(st, dt); D._sceneState = st; };
 
   /** things that decorate the road ahead: exit gantries, service and story signs */
   D.signsAhead = function (along) {

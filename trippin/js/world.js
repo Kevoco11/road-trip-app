@@ -31,6 +31,8 @@
     overture: {
       stac: 'https://stac.overturemaps.org/catalog.json', fallback: '2026-09-23.1', concurrency: 2, ttl: 30 * 86400000, keep: 160,
       url: (rel) => 'https://overturemaps-extras-us-west-2.s3.amazonaws.com/tiles/' + rel + '/buildings.pmtiles',
+      // the same bucket's base theme: satellite-derived land cover (ESA WorldCover), mapped individual trees and tree rows (OpenStreetMap)
+      baseUrl: (rel) => 'https://overturemaps-extras-us-west-2.s3.amazonaws.com/tiles/' + rel + '/base.pmtiles', baseZ: 13, baseKeep: 60,
     },
   });
 
@@ -124,12 +126,10 @@
   };
 
   /** tile units → the route's metre frame */
-  function localize(tile, frame) {
-    const key = frame.kx + '|' + frame.ky;
-    if (tile.local && tile.local.key === key) return tile.local;
+  function converter(tile, frame) {
     const N = Math.pow(2, tile.z), E = CFG.EXT;
     const cache = new Map(); // unmercY is the only trig-heavy step: one value per tile row, reused
-    const conv = (arr) => {
+    return (arr) => {
       const n = arr.length >> 1, o = new Float64Array(arr.length);
       for (let i = 0; i < n; i++) {
         const u = arr[2 * i], v = arr[2 * i + 1];
@@ -138,6 +138,11 @@
       }
       return o;
     };
+  }
+  function localize(tile, frame) {
+    const key = frame.kx + '|' + frame.ky;
+    if (tile.local && tile.local.key === key) return tile.local;
+    const conv = converter(tile, frame);
     const box = (o) => polyBBox(o);
     const L = { key, buildings: [], covers: [], roads: [], names: [] };
     for (const b of tile.buildings) { const ring = conv(b.ring); L.buildings.push({ ring, h: b.h, minH: b.minH, bb: box(ring) }); }
@@ -163,12 +168,13 @@
   };
 
   /** what a loaded tile contributes, as a string: changes when its buildings are replaced by Overture's, so built chunks rebuild */
-  W.tileSig = function (k) { const t = W.tiles.get(k); return t && t.state === 'ok' ? k + (t.bs === 'ok' ? '+o' : '') : null; };
+  W.tileSig = function (k) { const t = W.tiles.get(k); return t && t.state === 'ok' ? k + (t.bs === 'ok' ? '+o' : '') + (coverOf(k) ? '+c' : '') : null; };
 
   /** features from every loaded tile that overlaps bb (route metres). `need`/`have` let callers know whether to rebuild later */
   W.query = function (frame, bb) {
-    const need = W.tilesFor(frame, bb), res = { buildings: [], covers: [], roads: [], names: [], need: [], have: [] };
+    const need = W.tilesFor(frame, bb), res = { buildings: [], covers: [], roads: [], names: [], trees: [], rows: [], need: [], have: [] };
     const hit = (b) => !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3]);
+    const seenCover = new Set();
     for (const [x, y] of need) {
       const k = keyOf(x, y); res.need.push(k);
       const t = W.tiles.get(k);
@@ -179,6 +185,14 @@
       for (const c of L.covers) if (hit(c.bb)) res.covers.push(c);
       for (const r of L.roads) if (hit(r.bb)) res.roads.push(r);
       for (const nm of L.names) if (hit(nm.bb)) res.names.push(nm);
+      const ck = coverKey(x, y), ct = CV.tiles.get(ck);
+      if (ct && ct.state === 'ok' && !seenCover.has(ck)) {          // satellite land cover + mapped trees (one z13 tile covers four z14 tiles)
+        seenCover.add(ck);
+        const C = localizeCover(ct, frame);
+        for (const c of C.covers) if (hit(c.bb)) res.covers.push(c);
+        if (C.trees.length) res.trees.push(C.trees);
+        for (const r of C.rows) if (hit(r.bb)) res.rows.push(r);
+      }
     }
     res.covers.sort((a, b) => a.p - b.p);
     return res;
@@ -208,7 +222,7 @@
         t.data = W.compact(MP.mvt.decode(buf, CFG.layers), x, y); t.state = 'ok';
       }
       W.version++; mark(true, Date.now() - t0); emit('world', k);
-      ensureBuildings(x, y, k);
+      ensureBuildings(x, y, k); ensureCover(x, y);
     } catch (e) {
       t.state = 'err'; t.at = Date.now(); t.fails = (t.fails || 0) + 1; mark(false, 0, e && e.name === 'AbortError' ? 'scenery timed out' : (e && e.message) || 'failed');
     } finally { inflight--; pump(); }
@@ -222,7 +236,7 @@
     if (t) {
       touch(k);
       if (t.state === 'err' && Date.now() - t.at > Math.min(300000, 15000 * Math.pow(2, (t.fails || 1) - 1))) { t.state = 'load'; queue.push([x, y, k]); pump(); }
-      else if (t.state === 'ok' && t.bs !== 'ok' && t.bs !== 'empty') ensureBuildings(x, y, k);
+      else if (t.state === 'ok') { if (t.bs !== 'ok' && t.bs !== 'empty') ensureBuildings(x, y, k); ensureCover(x, y); }
       return t;
     }
     t = { state: 'load', data: null, at: Date.now(), fails: 0 }; W.tiles.set(k, t); trim();
@@ -244,7 +258,7 @@
       for (const x of xs) for (const y of ys) { const k = keyOf(x, y); if (y < 0 || y >= N || seen.has(k)) continue; seen.add(k); W.request(x, y); }
     }
   };
-  W.reset = function () { W.tiles.clear(); queue.length = 0; bqueue.length = 0; W.version++; };
+  W.reset = function () { W.tiles.clear(); CV.tiles.clear(); queue.length = 0; bqueue.length = 0; cqueue.length = 0; W.version++; };
 
   /* ------------------------------------------------------------------ Overture buildings */
   /* A tile's Overture footprints REPLACE its OSM ones when there are at least as many (Overture already contains OSM's), so
@@ -353,6 +367,99 @@
       if (W.tiles.get(k) === t) { t.bs = 'err'; t.bat = Date.now(); t.bfails = (t.bfails || 0) + 1; }
       markB(false, e && e.name === 'AbortError' ? 'buildings timed out' : (e && e.message) || 'failed');
     } finally { binflight--; bpump(); }
+  }
+
+  /* ------------------------------------------------------------------ Overture land cover + trees */
+  /* OpenStreetMap maps woods that someone drew; satellites see the trees that are actually there (hedgerows, wood lots, tree-lined
+   * suburban streets). Overture's base theme carries ESA WorldCover's tree/crop/shrub/built-up classes as polygons, plus every tree and
+   * tree row mapped in OpenStreetMap (a Sterling Heights tile holds ~400 individual trees). Drawn UNDER the OpenStreetMap land use
+   * except forest, which paints over residential/commercial land use (a neighbourhood's land use says nothing about its trees).
+   * Zoom 13 is the finest the archive offers: one tile is ~4.9 km wide, so the polygons are generalised and trees inside them are
+   * placed on a jittered grid — the same way the OSM woods are filled. Nothing is drawn where the archive has no data. */
+  const COVER = { forest: ['wood', 2.5], mangrove: ['wood', 2.5], wetland: ['wet', 2.2], shrub: ['grass', 0.6], grass: ['grass', 0.6], moss: ['grass', 0.6], crop: ['farm', 0.5], urban: ['res', 0.4], barren: ['sand', 0.5], snow: ['sand', 0.5] };
+  const CV = (W.cover = { tiles: new Map(), status: { state: 'idle', err: null, tiles: 0, trees: 0 } });
+  const coverKey = (x, y) => (x >> 1) + '/' + (y >> 1);
+  const coverOf = (k) => { const s = k.split('/'), t = CV.tiles.get(coverKey(+s[0], +s[1])); return !!t && t.state === 'ok'; };
+  W.coverKey = coverKey;
+
+  /** Overture base layers (tile units, y south) → { covers, trees (flat x,y…), rows (tree-row lines) } */
+  W.compactCover = function (layers) {
+    const out = { covers: [], trees: new Float32Array(0), rows: [] };
+    const E = CFG.EXT, lc = layers && layers.land_cover, ld = layers && layers.land;
+    if (lc) {
+      const sc = E / (lc.extent || E);
+      for (const ft of lc.features) {
+        const m = COVER[ft.props.subtype]; if (!m) continue;
+        for (const p of ft.polys || []) {
+          const outer = f32(p.outer, true), holes = p.holes.map((h) => f32(h, true));
+          if (sc !== 1) { for (let i = 0; i < outer.length; i++) outer[i] *= sc; for (const h of holes) for (let i = 0; i < h.length; i++) h[i] *= sc; }
+          out.covers.push({ kind: KIND[m[0]], p: m[1], outer, holes, bb: polyBBox(outer), cls: ft.props.subtype });
+        }
+      }
+    }
+    if (ld) {
+      const sc = E / (ld.extent || E), pts = [];
+      for (const ft of ld.features) {
+        if (ft.props.subtype !== 'tree') continue;
+        if (ft.type === 1) { for (const r of ft.rings) { const x = r[0] * sc, y = r[1] * sc; if (x >= 0 && x < E && y >= 0 && y < E) pts.push(x, y); } }   // buffer duplicates belong to the neighbour
+        else if (ft.type === 2) for (const r of ft.rings) if (r.length >= 4) { const a = Float32Array.from(r); if (sc !== 1) for (let i = 0; i < a.length; i++) a[i] *= sc; out.rows.push({ pts: a, bb: polyBBox(a) }); }
+      }
+      out.trees = Float32Array.from(pts);
+    }
+    return out;
+  };
+
+  function localizeCover(ct, frame) {
+    const key = frame.kx + '|' + frame.ky;
+    if (ct.local && ct.local.key === key) return ct.local;
+    const conv = converter({ z: CFG.overture.baseZ, x: ct.x, y: ct.y }, frame), d = ct.data;
+    const L = { key, covers: [], trees: conv(d.trees), rows: [] };
+    for (const c of d.covers) { const outer = conv(c.outer); L.covers.push({ kind: c.kind, p: c.p, outer, holes: c.holes.map(conv), bb: polyBBox(outer), cls: c.cls }); }
+    for (const r of d.rows) { const pts = conv(r.pts); L.rows.push({ pts, bb: polyBBox(pts) }); }
+    ct.local = L; return L;
+  }
+
+  let barchive = null, cinflight = 0; const cqueue = [];
+  async function baseArchive(force) {
+    if (barchive && !force) return barchive;
+    const rel = await W.overtureRelease(force);
+    return (barchive = MP.pmtiles.open(CFG.overture.baseUrl(rel), { fetch: W.fetchImpl }));
+  }
+  /** the decompressed Overture base MVT for z13 tile (x, y), or null (tests replace this) */
+  W.coverTile = async function (x, y) {
+    let a = await baseArchive(false);
+    try { return await a.tile(CFG.overture.baseZ, x, y); }
+    catch (e) { if (e && (e.status === 403 || e.status === 404)) { a = await baseArchive(true); return a.tile(CFG.overture.baseZ, x, y); } throw e; }
+  };
+  function ensureCover(x14, y14) {
+    if (!MP.pmtiles || CFG.overture.off || CFG.overture.coverOff) return;
+    const k = coverKey(x14, y14); let t = CV.tiles.get(k);
+    if (t) { if (t.state === 'err' && Date.now() - t.at > Math.min(300000, 20000 * Math.pow(2, (t.fails || 1) - 1))) { t.state = 'load'; cqueue.push(k); cpump(); } return; }
+    t = { state: 'load', x: x14 >> 1, y: y14 >> 1, data: null, at: Date.now(), fails: 0 }; CV.tiles.set(k, t);
+    while (CV.tiles.size > CFG.overture.baseKeep) { const kk = CV.tiles.keys().next().value; if (CV.tiles.get(kk).state === 'load') break; CV.tiles.delete(kk); }
+    cqueue.push(k); cpump();
+  }
+  function cpump() { while (cinflight < 2 && cqueue.length) { const k = cqueue.shift(), t = CV.tiles.get(k); if (!t || t.state !== 'load') continue; cinflight++; loadCover(k); } }
+  async function loadCover(k) {
+    const t = CV.tiles.get(k);
+    try {
+      const key = 'ovc:' + k, saved = MP.kv && !W.fetchImpl ? await MP.kv.get(key) : null;
+      let data;
+      if (saved && saved.data && Date.now() - saved.at < CFG.overture.ttl) data = saved.data;
+      else {
+        const bytes = await W.coverTile(t.x, t.y);
+        data = bytes ? W.compactCover(MP.mvt.decode(bytes, ['land_cover', 'land'])) : { covers: [], trees: new Float32Array(0), rows: [] };
+        if (MP.kv && MP.store && !W.fetchImpl) {
+          MP.kv.set(key, { at: Date.now(), data }).then(() => { const idx = (MP.store.get('ovcCells', []) || []).filter((q) => q !== key); idx.push(key); while (idx.length > CFG.overture.baseKeep) MP.kv.del(idx.shift()); MP.store.set('ovcCells', idx); }).catch(() => {});
+        }
+      }
+      if (CV.tiles.get(k) !== t) return;
+      t.data = data; t.state = 'ok'; CV.status.state = 'ok'; CV.status.err = null; CV.status.tiles++; CV.status.trees += data.trees.length >> 1;
+      W.version++; emit('world', k);
+    } catch (e) {
+      if (CV.tiles.get(k) === t) { t.state = 'err'; t.at = Date.now(); t.fails = (t.fails || 0) + 1; }
+      CV.status.state = 'error'; CV.status.err = e && e.name === 'AbortError' ? 'land cover timed out' : (e && e.message) || 'failed';
+    } finally { cinflight--; cpump(); }
   }
 
   /** probe for Trip → Health check: the archive header and one real tile */

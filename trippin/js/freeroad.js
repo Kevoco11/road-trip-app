@@ -103,7 +103,7 @@
     if (xs.length < 4 || len < 40) { FR.status = 'off the map'; return null; }
     const pts = new Float64Array(xs.length);
     for (let k = 0; k < xs.length; k += 2) { pts[k] = xs[k + 1] / frame.ky; pts[k + 1] = xs[k] / frame.kx; }
-    const route = new MP.Route({ pts, steps: [], name: '', source: 'map', duration: 0 });
+    const route = new MP.Route({ pts, steps: [], name: '', source: 'map', duration: 0 }); route.free = true;   // no destination: no guidance chevrons
     FR.status = 'ok'; FR.builds++;
     return { route, hint: null, version: W.version, at: Date.now(), cls: at.r.cls };
   };

@@ -486,7 +486,7 @@
       }
       r._li = { ver: lanesVer, v }; return v;
     };
-    const tileRoad = pack(PAL.asphalt[0] + 4, PAL.asphalt[1] + 4, PAL.asphalt[2] + 4, 0);
+    const tileRoad = pack(PAL.asphalt[0] + 4, PAL.asphalt[1] + 4, PAL.asphalt[2] + 4, 30);
     const cWhiteP = pack(PAL.white[0], PAL.white[1], PAL.white[2], 255), cYellowP = pack(PAL.yellow[0], PAL.yellow[1], PAL.yellow[2], 255);
     for (const r of q.roads) {
       const p = r.pts, n = p.length >> 1;
@@ -547,7 +547,7 @@
       const Cc = [f1.x + f1.nx * x1, f1.y + f1.ny * x1, f1.z + z], D = [f1.x + f1.nx * x0, f1.y + f1.ny * x0, f1.z + z];
       base.quad(A, B, Cc, D, col);
     };
-    const cAsph = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 0), cShl = pack(PAL.shoulder[0], PAL.shoulder[1], PAL.shoulder[2], 0);
+    const cAsph = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 30), cShl = pack(PAL.shoulder[0], PAL.shoulder[1], PAL.shoulder[2], 30);
     for (let i = 0; i + 1 < slices.length; i++) {
       const s = secs[i], J = jNear((slices[i].a + slices[i + 1].a) / 2);
       if (s.shL > 0 && !(J && J.left)) band(i, -s.hw - s.shL, -s.hw, rz - 0.02, cShl);
@@ -578,6 +578,15 @@
         }
       }
     }
+    // navigation guidance: chevrons down the lane the car rides, every 9 m (alpha 192 = "guide": the shader pulses them forward and fades them with distance).
+    // They are the route itself — nothing is drawn for a free drive, where there is no destination.
+    if (!route.free) {
+      const cg = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 192), zg = lz + 0.05;
+      for (let ga = Math.ceil(a0 / 9) * 9; ga < a1 - 2; ga += 9) {
+        const lat = secAt(ga).cam, T0 = P(ga + 1.7, lat, zg), T1 = P(ga + 1.0, lat, zg);
+        for (const sd of [-1, 1]) base.quad(T0, T1, P(ga - 0.7, lat + sd * 1.15, zg), P(ga - 0.05, lat + sd * 1.15, zg), cg);
+      }
+    }
     // delineator posts every 38 m along the right edge of highways (retro-reflective: they glow in the headlights)
     {
       const pc = pack(PAL.post[0], PAL.post[1], PAL.post[2], 255), r = 0.07;
@@ -606,7 +615,7 @@
       if (nb >= budget) break;
       const r = b.ring, m = r.length >> 1, gz = zOf(hit.a), h = b.h, seed = Math.floor(cx * 0.37) * 7919 + Math.floor(cy * 0.37);
       const wc = shade(WALLS[(hash2(seed, 1, 3) * WALLS.length) | 0], 0.95 + hash2(seed, 2, 3) * 0.1), rc = ROOFS[(hash2(seed, 4, 3) * ROOFS.length) | 0];
-      const wallC = pack(wc[0], wc[1], wc[2], 0), roofC = pack(rc[0], rc[1], rc[2], 0);
+      const wallC = pack(wc[0], wc[1], wc[2], 64), roofC = pack(rc[0], rc[1], rc[2], 0);
       const zb = gz - 0.6;
       // gabled roof for small rectangular houses; flat roof otherwise
       let area = 0; for (let i = 0, j = m - 1; i < m; j = i++) area += r[2 * j] * r[2 * i + 1] - r[2 * i] * r[2 * j + 1]; area = Math.abs(area) / 2;
@@ -746,7 +755,7 @@
 
     /* ---- trees: only where OpenStreetMap maps woods / parks / wetland (nothing is invented elsewhere) */
     const month = C.month != null ? C.month : 5, autumn = month >= 8 && month <= 10 ? (month === 8 ? 0.25 : month === 9 ? 0.6 : 0.4) : 0;
-    const K = world.KIND, treeBudget = 2600; let nt = 0;
+    const K = world.KIND, treeBudget = 5200, treeVerts = 150000; let nt = 0; const tv0 = detail.n;
     const cands = [];
     const tlx0 = Math.floor(bb[0] / 7), tlx1 = Math.ceil(bb[2] / 7), tly0 = Math.floor(bb[1] / 7), tly1 = Math.ceil(bb[3] / 7);
     for (let j = tly0; j < tly1; j++) for (let i = tlx0; i < tlx1; i++) {
@@ -757,24 +766,44 @@
       const hit = idx.nearest(x, y, TREE_REACH); if (!hit || !own(hit.a)) continue;
       cands.push({ x, y, hit, i, j, kd });
     }
+    // trees someone mapped one by one (street trees, hedgerow trees) and tree rows, from OpenStreetMap via Overture
+    const addMapped = (x, y) => {
+      if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3] || raster.blockAt(x, y)) return;
+      const hit = idx.nearest(x, y, TREE_REACH); if (!hit || !own(hit.a)) return;
+      cands.push({ x, y, hit, i: Math.floor(x * 2), j: Math.floor(y * 2), kd: 'm' }); stats.mapped = (stats.mapped || 0) + 1;
+    };
+    for (const arr of q.trees || []) for (let i = 0; i + 1 < arr.length; i += 2) addMapped(arr[i], arr[i + 1]);
+    for (const r of q.rows || []) {
+      const p = r.pts;
+      for (let i = 0; i + 3 < p.length; i += 2) {
+        const ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3], l = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.round(l / 8));
+        for (let s = 0; s < n; s++) { const u = (s + 0.5) / n; addMapped(ax + (bx - ax) * u + (hash2(s, i, 51) - 0.5) * 1.6, ay + (by - ay) * u + (hash2(s, i, 52) - 0.5) * 1.6); }
+      }
+    }
     cands.sort((p, q2) => p.hit.d - q2.hit.d);
     for (const c of cands) {
-      if (nt >= treeBudget) break;
+      if (nt >= treeBudget || detail.n - tv0 > treeVerts) break;
+      // beyond the first hundred metres or so a forest only needs to read as one: thin it out so the budget reaches the horizon
+      if (c.kd !== 'm' && c.hit.d > 150 && hash2(c.i, c.j, 41) > (c.hit.d > 240 ? 0.3 : 0.55)) continue;
       const r1 = hash2(c.i, c.j, 21), r2 = hash2(c.i, c.j, 22), r3 = hash2(c.i, c.j, 23), gz = zOf(c.hit.a), x = c.x - O.x, y = c.y - O.y;
-      const conifer = r1 < 0.32, ht = (c.kd === K.wood ? 7 : 6) + r2 * 8, rad = (conifer ? 1.9 : 2.8) + r3 * 1.6;
+      const conifer = c.kd !== 'm' && r1 < 0.32, far = c.hit.d > 105, ht = (c.kd === K.wood ? 7 : c.kd === 'm' ? 6.5 : 6) + r2 * (c.kd === 'm' ? 7 : 8), rad = (conifer ? 1.9 : 2.8) + r3 * 1.6;
       let col; if (conifer) col = TREES.conifer[(r2 * TREES.conifer.length) | 0]; else col = r3 < autumn ? TREES.autumn[(r1 * 7 | 0) % TREES.autumn.length] : TREES.green[(r2 * TREES.green.length) | 0];
-      const cc = shade(col, 0.88 + r1 * 0.24), cpk = pack(cc[0], cc[1], cc[2], 0), tk = pack(72, 54, 38, 0);
+      const cc = shade(col, 0.88 + r1 * 0.24), cpk = pack(cc[0], cc[1], cc[2], 90), tk = pack(72, 54, 38, 0);
       // trunk
       const tr = 0.22; detail.quad([x - tr, y, gz], [x + tr, y, gz], [x + tr, y, gz + ht * 0.4], [x - tr, y, gz + ht * 0.4], tk); detail.quad([x, y - tr, gz], [x, y + tr, gz], [x, y + tr, gz + ht * 0.4], [x, y - tr, gz + ht * 0.4], tk);
       const sides = 6, rot = r1 * 6.28;
-      if (conifer) { // layered cone
+      if (far) { // distant tree: one tapered blob (10 faces) — it only has to read as a tree
+        const ch = Math.min(ht * 0.66, rad * 1.8), zb2 = gz + ht - ch, top = pack(clamp8(cc[0] * 1.1), clamp8(cc[1] * 1.1), clamp8(cc[2] * 1.08), 90), low = pack(clamp8(cc[0] * 0.74), clamp8(cc[1] * 0.76), clamp8(cc[2] * 0.74), 90);
+        const rr2 = conifer ? rad * 0.9 : rad * 1.05, zm = zb2 + ch * (conifer ? 0.15 : 0.45), ring5 = []; for (let s = 0; s < 5; s++) { const a_ = rot + (s / 5) * 6.2832; ring5.push([x + Math.cos(a_) * rr2, y + Math.sin(a_) * rr2]); }
+        for (let s = 0; s < 5; s++) { const n = (s + 1) % 5; detail.tri(ring5[s][0], ring5[s][1], zm, ring5[n][0], ring5[n][1], zm, x, y, zb2 - 0.2, low); detail.tri(ring5[s][0], ring5[s][1], zm, ring5[n][0], ring5[n][1], zm, x, y, gz + ht, cpk, cpk, top); }
+      } else if (conifer) { // layered cone
         for (let lay = 0; lay < 2; lay++) {
           const zb2 = gz + ht * (0.18 + lay * 0.3), zt2 = gz + ht * (lay ? 1 : 0.78), rr = rad * (lay ? 0.62 : 1);
           for (let s = 0; s < sides; s++) { const a_ = rot + (s / sides) * 6.2832, b_ = rot + ((s + 1) / sides) * 6.2832; detail.tri(x + Math.cos(a_) * rr, y + Math.sin(a_) * rr, zb2, x + Math.cos(b_) * rr, y + Math.sin(b_) * rr, zb2, x, y, zt2, cpk); }
         }
       } else { // rounded canopy: bottom cap, belly ring, upper ring, apex (36 faces, lighter on top, darker underneath)
         const ch = Math.min(ht * 0.62, rad * 1.7), zb2 = gz + ht - ch, zm = zb2 + ch * 0.42, zu = zb2 + ch * 0.78, zt2 = gz + ht;
-        const top = pack(clamp8(cc[0] * 1.14), clamp8(cc[1] * 1.14), clamp8(cc[2] * 1.12), 0), low = pack(clamp8(cc[0] * 0.72), clamp8(cc[1] * 0.74), clamp8(cc[2] * 0.72), 0);
+        const top = pack(clamp8(cc[0] * 1.14), clamp8(cc[1] * 1.14), clamp8(cc[2] * 1.12), 90), low = pack(clamp8(cc[0] * 0.72), clamp8(cc[1] * 0.74), clamp8(cc[2] * 0.72), 90);
         const ring = (zr, rr, off) => { const o = []; for (let s = 0; s < 7; s++) { const a_ = rot + off + (s / 7) * 6.2832, j = 0.86 + hash2(c.i * 7 + s, c.j, 31) * 0.28; o.push([x + Math.cos(a_) * rr * j, y + Math.sin(a_) * rr * j, zr]); } return o; };
         const r0 = ring(zb2, rad * 0.55, 0), r1 = ring(zm, rad, 0.2), r2 = ring(zu, rad * 0.78, 0.45);
         for (let s = 0; s < 7; s++) {
@@ -798,8 +827,10 @@
     for (;;) { const r = g.next(); if (r.done) return r.value; }
   };
 
+  /** a wall quad; its foot is shaded darker than its top (baked ambient occlusion: walls meet the ground in shadow) */
   function wall(mesh, x0, y0, x1, y1, zb, zt, col) {
-    mesh.tri(x0, y0, zb, x1, y1, zb, x1, y1, zt, col); mesh.tri(x0, y0, zb, x1, y1, zt, x0, y0, zt, col);
+    const k = 0.66, lo = ((col >>> 24) << 24) | ((((col >> 16) & 255) * k | 0) << 16) | ((((col >> 8) & 255) * k | 0) << 8) | ((col & 255) * k | 0);
+    mesh.tri(x0, y0, zb, x1, y1, zb, x1, y1, zt, lo, lo, col); mesh.tri(x0, y0, zb, x1, y1, zt, x0, y0, zt, lo, col, col);
   }
 
   /** camera lateral offset (m, + right) of the lane the car is in at original distance a, from a built chunk (or a default) */

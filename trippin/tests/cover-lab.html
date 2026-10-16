@@ -1,0 +1,22 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>cover lab</title>
+<!-- Test bench only (never shipped): paints a REAL Overture base z13 tile (land cover) next to the REAL OpenFreeMap z14 woods for the same ground. ?lat=&lng= -->
+<style>body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block;margin:6px}</style></head><body>
+<canvas id="a" width="820" height="820"></canvas><pre id="o"></pre>
+<script src="../js/core.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search), lat = +(q.get('lat') || 42.9226), lng = +(q.get('lng') || -83.0447), rel = q.get('rel') || '2026-09-23.1';
+  const n = 2 ** 13, x = Math.floor((lng + 180) / 360 * n), y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n);
+  const ar = MP.pmtiles.open('https://overturemaps-extras-us-west-2.s3.amazonaws.com/tiles/' + rel + '/base.pmtiles', {});
+  const L = MP.mvt.decode(await ar.tile(13, x, y), null), E = L.land_cover.extent, S = 820 / E;
+  const c = document.getElementById('a').getContext('2d'), COL = { forest: '#2f6b36', shrub: '#8aa24a', crop: '#d8c77a', urban: '#9a9a9a', barren: '#caa77a', wetland: '#4fa3a0', grass: '#7bbf5a', snow: '#fff', moss: '#5d8', mangrove: '#274' };
+  c.fillStyle = '#123'; c.fillRect(0, 0, 820, 820);
+  const draw = (f, col) => { for (const p of f.polys || []) { c.beginPath(); for (const r of [p.outer].concat(p.holes)) { for (let i = 0; i < r.length; i += 2) c[i ? 'lineTo' : 'moveTo'](r[i] * S, r[i + 1] * S); c.closePath(); } c.fillStyle = col; c.fill('evenodd'); } };
+  const order = ['barren', 'crop', 'grass', 'shrub', 'wetland', 'forest', 'urban'], by = {}; for (const f of L.land_cover.features) (by[f.props.subtype] = by[f.props.subtype] || []).push(f);
+  for (const s of order) for (const f of by[s] || []) draw(f, COL[s] || '#f0f');
+  const info = { tile: [x, y], layers: Object.fromEntries(Object.entries(L).map(([k, v]) => [k, v.features.length])), cover: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v.length])) };
+  const land = {}; for (const f of L.land.features) { const k = f.props.subtype + '/' + f.props.class + '/t' + f.type; land[k] = (land[k] || 0) + 1; } info.land = land;
+  document.getElementById('o').textContent = JSON.stringify(info, null, 1);
+  window.info = info; window.done = true;
+})();
+</script></body></html>

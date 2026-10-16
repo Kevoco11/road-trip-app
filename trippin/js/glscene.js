@@ -15,36 +15,91 @@
   const D2R = Math.PI / 180;
   const T = () => MP.terrain;
 
+  /* Material tags ride in the vertex alpha (0..255): 0 ground/plain · 30 asphalt · 64 building wall (windows) · 90 foliage · 128 lamp (emissive)
+   * · 192 navigation guide · 255 retro-reflective paint. Everything else about a surface (grain, glass, sheen) is decided here per pixel. */
   const VS = `#version 300 es
 in vec3 aPos; in vec4 aCol; in vec2 aUV;
 uniform vec3 uCamRel; uniform vec2 uDir; uniform vec3 uProj; uniform vec2 uNF;
-out vec3 vView; out vec4 vCol; out vec2 vUV;
+out vec3 vView; out vec3 vLoc; out vec4 vCol; out vec2 vUV;
 void main(){
   vec3 d = aPos - uCamRel;
   float xv = d.x*uDir.y - d.y*uDir.x;        // right   = (cos h, -sin h)
   float zv = d.x*uDir.x + d.y*uDir.y;        // forward = (sin h,  cos h)
-  vView = vec3(xv, d.z, zv);
+  vView = vec3(xv, d.z, zv); vLoc = aPos;
   gl_Position = vec4(xv*uProj.x, d.z*uProj.y + uProj.z*zv, (zv*(uNF.y+uNF.x) - 2.0*uNF.x*uNF.y)/(uNF.y-uNF.x), zv);
   vCol = aCol; vUV = aUV;
 }`;
   const FS = `#version 300 es
 precision highp float;
-in vec3 vView; in vec4 vCol; in vec2 vUV;
-uniform vec3 uSunDir, uSunCol, uAmb, uFogCol, uHeadCol; uniform float uFogD, uHead;
+in vec3 vView; in vec3 vLoc; in vec4 vCol; in vec2 vUV;
+uniform vec3 uSunDir, uSunCol, uAmb, uFogCol, uHeadCol, uGuide; uniform float uFogD, uHead, uWet, uTime; uniform vec2 uOrg;
 uniform sampler2D uTex;
 out vec4 o;
+float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(h21(i), h21(i + vec2(1.0, 0.0)), f.x), mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), f.x), f.y); }
+// soft filmic shoulder + a little saturation: highlights roll off instead of clipping, shadows keep their colour (scene.js repeats this for the far ground)
+vec3 tone(vec3 c){ c = c*(1.0 + c/2.6)/(1.0 + c); float l = dot(c, vec3(0.299, 0.587, 0.114)); return clamp(mix(vec3(l), c, 1.12), 0.0, 1.0); }
 void main(){
-  vec3 base = vCol.rgb; float em = step(0.4, vCol.a) * step(vCol.a, 0.6); float refl = vCol.a * (1.0 - em);
-  if (vUV.x >= 0.0) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; em = 0.0; }
+  float a = vCol.a;
+  float em = step(0.4, a)*step(a, 0.6), refl = step(0.9, a);
+  float mAsph = step(0.08, a)*step(a, 0.16), mWall = step(0.2, a)*step(a, 0.3), mFol = step(0.31, a)*step(a, 0.4), mGuide = step(0.7, a)*step(a, 0.8);
+  float mPaint = step(0.61, a)*step(a, 0.66), mLamp = step(0.84, a)*step(a, 0.9);
+  vec3 base = vCol.rgb; bool tex = vUV.x >= 0.0;
+  if (tex) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; em = 0.0; mAsph = 0.0; mWall = 0.0; mFol = 0.0; mGuide = 0.0; mPaint = 0.0; mLamp = 0.0; }
+  float dist = length(vView); vec3 vd = vView / dist;
   vec3 n = -normalize(cross(dFdx(vView), dFdy(vView)));
   if (dot(n, vView) > 0.0) n = -n;
-  float dist = length(vView);
-  float ndl = max(dot(n, uSunDir), 0.0);
-  float hl = uHead * exp(-dist/42.0) * (0.3 + 0.7*max(dot(n, -vView/dist), 0.0));
-  vec3 c = base * (uAmb + uSunCol*ndl + uHeadCol*hl*(1.0 + 5.0*refl));
-  c = mix(c, base, em * clamp((uHead - 0.2) * 4.0, 0.0, 1.0));   // lamps come on as the daylight goes
-  c = mix(c, uFogCol, 1.0 - exp(-dist/uFogD));
-  o = vec4(c, 1.0);
+  vec3 nw = normalize(cross(dFdx(vLoc), dFdy(vLoc)));       // the same flat normal in world axes (z up); only its direction matters
+  float up = abs(nw.z); vec2 wp = vLoc.xy + uOrg;
+  float plain = (!tex && em < 0.5 && refl < 0.5 && mWall < 0.5 && mFol < 0.5 && mAsph < 0.5 && mGuide < 0.5 && mPaint < 0.5 && mLamp < 0.5) ? 1.0 : 0.0;
+  // ground: fine grain that fades before it can shimmer, plus slow patchiness (mown strips, worn turf, bare soil) that does not
+  if (plain > 0.5 && up > 0.92) {
+    float fade = 1.0 - smoothstep(35.0, 240.0, dist);
+    base *= 1.0 + ((vn(wp*0.33) - 0.5)*0.17 + (vn(wp*2.3) - 0.5)*0.11)*fade + (vn(wp*0.035) - 0.5)*0.16;
+  }
+  // asphalt: aggregate grain and worn patches
+  if (mAsph > 0.5) { float fine = 1.0 - smoothstep(14.0, 70.0, dist), broad = 1.0 - smoothstep(40.0, 260.0, dist); base *= 1.0 + (vn(wp*5.0) - 0.5)*0.07*fine + (vn(wp*1.3) - 0.5)*0.05*fine + (vn(wp*0.31) - 0.5)*0.12*broad; }
+  // building walls: a window grid in glass that carries the sky and glints in the sun (the grid is architecture, not data: it says nothing about who is inside)
+  float glass = 0.0;
+  if (mWall > 0.5 && up < 0.35) {
+    vec2 tg = normalize(vec2(-nw.y, nw.x));
+    vec2 g = vec2(dot(vLoc.xy, tg)/3.6, vLoc.z/3.3 + 0.37), id = floor(g), f = fract(g);
+    float aa = clamp(1.0 - 1.7*max(fwidth(g.x), fwidth(g.y)), 0.0, 1.0);
+    float wx = smoothstep(0.16, 0.21, f.x)*(1.0 - smoothstep(0.79, 0.84, f.x)), wy = smoothstep(0.30, 0.35, f.y)*(1.0 - smoothstep(0.78, 0.84, f.y));
+    float r = h21(id + floor(dot(vLoc.xy, tg)*0.0 + wp.x*0.071 + wp.y*0.113));
+    glass = wx*wy*aa*step(0.10, r)*(1.0 - smoothstep(230.0, 400.0, dist));
+    base = mix(base, mix(vec3(0.07, 0.10, 0.15), uFogCol*0.85, 0.22 + 0.25*r), glass*0.93);
+  }
+  // sun & sky light: hemisphere ambient (sky above, ground bounce below), directional sun, night headlights
+  float ndl = max(dot(n, uSunDir), 0.0), hemi = n.y*0.5 + 0.5;
+  vec3 amb = mix(uAmb*0.70, uAmb + uFogCol*0.14, hemi);
+  vec3 sunL = uSunCol*ndl;
+  float hl = uHead*exp(-dist/42.0)*(0.3 + 0.7*max(dot(n, -vd), 0.0));
+  if (mFol > 0.5) {   // leaves: clumped light and dark, and glowing when the sun is behind them
+    base *= 0.82 + 0.34*vn(wp*1.6 + vLoc.z*1.4);
+    sunL += uSunCol*pow(max(dot(vd, uSunDir), 0.0), 3.0)*0.55*vec3(1.0, 1.0, 0.6);
+  }
+  vec3 c = base*(amb + sunL + uHeadCol*hl*(1.0 + 5.0*refl));
+  if (glass > 0.0) c += glass*uSunCol*pow(max(dot(reflect(vd, n), uSunDir), 0.0), 34.0)*1.3;
+  if (mAsph > 0.5 && up > 0.9) {   // road sheen: the sky in the pavement at grazing angles, much more of it when it is raining
+    float fr = pow(1.0 - max(dot(n, -vd), 0.0), 3.0);
+    c = mix(c, uFogCol*1.05, (0.05 + 0.55*uWet)*fr) + uSunCol*pow(max(dot(reflect(vd, n), uSunDir), 0.0), 60.0)*(0.06 + 0.8*uWet);
+  }
+  if (mPaint > 0.5) {   // clear-coat: a hot sun highlight and the sky riding on every panel at glancing angles
+    float fr = pow(1.0 - max(dot(n, -vd), 0.0), 3.0);
+    c = mix(c, uFogCol*1.1, 0.08 + 0.34*fr) + uSunCol*pow(max(dot(reflect(vd, n), uSunDir), 0.0), 26.0)*0.85;
+  }
+  c = mix(c, base, em*clamp((uHead - 0.2)*4.0, 0.0, 1.0));   // lamps come on as the daylight goes
+  if (mLamp > 0.5) c = base*1.15;                              // lamps that are lit right now (brake lights)
+  c = tone(c*1.22);
+  if (mGuide > 0.5) {   // the way ahead: chevrons that flow forward along your lane
+    float k = (1.0 - smoothstep(140.0, 430.0, dist))*smoothstep(16.0, 32.0, dist)*(0.62 + 0.38*sin(dist*0.42 - uTime*5.0));
+    c = mix(c, uGuide, clamp(k, 0.0, 0.96));
+  }
+  float fogA = 1.0 - exp(-dist/uFogD);
+  vec3 fogC = uFogCol + uSunCol*pow(max(dot(vd, uSunDir), 0.0), 6.0)*0.20*fogA;   // haze glows toward the sun
+  o = vec4(mix(c, fogC, fogA), 1.0);
 }`;
 
   class GLWorld {
@@ -64,7 +119,7 @@ void main(){
         const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS)); gl.bindAttribLocation(pr, 0, 'aPos'); gl.bindAttribLocation(pr, 1, 'aCol'); gl.bindAttribLocation(pr, 2, 'aUV');
         gl.linkProgram(pr); if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error('link: ' + gl.getProgramInfoLog(pr));
         this.cv = cv; this.gl = gl; this.pr = pr; this.u = {};
-        for (const n of ['uCamRel', 'uDir', 'uProj', 'uNF', 'uSunDir', 'uSunCol', 'uAmb', 'uFogCol', 'uHeadCol', 'uFogD', 'uHead', 'uTex']) this.u[n] = gl.getUniformLocation(pr, n);
+        for (const n of ['uCamRel', 'uDir', 'uProj', 'uNF', 'uSunDir', 'uSunCol', 'uAmb', 'uFogCol', 'uHeadCol', 'uFogD', 'uHead', 'uTex', 'uOrg', 'uWet', 'uTime', 'uGuide']) this.u[n] = gl.getUniformLocation(pr, n);
         cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.ok = false; this.contextLost = true; });
         cv.addEventListener('webglcontextrestored', () => { this.contextLost = false; this.failed = false; this._reinit(); });
         this.white = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.white); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
@@ -230,6 +285,7 @@ void main(){
       gl.uniform2f(u.uNF, 1.6, 5200);
       gl.uniform3fv(u.uSunDir, this._viewDir(L.sunWorld, ph)); gl.uniform3fv(u.uSunCol, L.sunCol); gl.uniform3fv(u.uAmb, L.amb);
       gl.uniform3fv(u.uFogCol, L.fogCol); gl.uniform3fv(u.uHeadCol, L.headCol); gl.uniform1f(u.uFogD, L.fogD); gl.uniform1f(u.uHead, L.head);
+      gl.uniform1f(u.uWet, L.wet || 0); gl.uniform1f(u.uTime, (cam.t || 0) % 1000); gl.uniform3fv(u.uGuide, L.guide || [0.24, 0.96, 0.66]);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.white); gl.uniform1i(u.uTex, 0);
       let tris = 0, drawn = 0;
       const chunks = [...s.chunks.values()].filter((c) => c.a1 > A - 120 && c.a0 < A + view).sort((p, q) => Math.abs(p.k - kc) - Math.abs(q.k - kc));
@@ -237,6 +293,7 @@ void main(){
         // camera relative to the chunk origin, in doubles
         const cz = (z0cam - c.origin.z) * EX + camH;
         gl.uniform3f(u.uCamRel, pose.x - c.origin.x, pose.y - c.origin.y, cz);
+        gl.uniform2f(u.uOrg, ((c.origin.x % 4096) + 4096) % 4096, ((c.origin.y % 4096) + 4096) % 4096);   // keeps world-anchored surface noise continuous across chunk seams
         const near = Math.abs(c.k - kc) <= (this.quality >= 2 ? 2 : this.quality === 1 ? 1 : -1);
         for (const m of near ? [c.gbase, c.gdetail] : [c.gbase]) if (m) { gl.bindVertexArray(m.vao); gl.drawArrays(gl.TRIANGLES, 0, m.n); tris += m.n / 3; }
         drawn++;
@@ -247,20 +304,42 @@ void main(){
       if (!cam.noWorld) for (const c of chunks) for (const J of c.junctions || []) { const d = J.a - cam.along; if (J.name && d > 6 && d < 420) ahead.push({ kind: 'street', d: d + J.half + 2.5, text: blade(J.name), sub: '', side: 'right', j: J }); }
       ahead.sort((p, q) => p.d - q.d);
       this.junctionsAhead = ahead.map((g) => ({ d: g.j.a - cam.along, name: g.j.name, signal: g.j.signal, stop: g.j.stop }));
-      const sv = this._signs((cam.signs || []).slice(0, 4).concat(ahead.slice(0, 4)), { x: pose.x, y: pose.y }, s, { along: cam.along, zOf, camH, edge: 6.5 });
+      let sv = this._signs((cam.signs || []).slice(0, 4).concat(ahead.slice(0, 4)), { x: pose.x, y: pose.y }, s, { along: cam.along, zOf, camH, edge: 6.5 });
+      const carV = cam.car ? this._car(cam, s, pose, zOf, camH, own.camLat) : null;
+      if (carV) { if (sv) { const m = new Float32Array(sv.length + carV.length); m.set(sv); m.set(carV, sv.length); sv = m; } else sv = carV; }
       if (sv) {
         const gl2 = gl; if (!this.signVao) { this.signVao = gl2.createVertexArray(); this.signBuf = gl2.createBuffer(); }
         gl2.bindVertexArray(this.signVao); gl2.bindBuffer(gl2.ARRAY_BUFFER, this.signBuf); gl2.bufferData(gl2.ARRAY_BUFFER, sv, gl2.DYNAMIC_DRAW);
         gl2.enableVertexAttribArray(0); gl2.vertexAttribPointer(0, 3, gl2.FLOAT, false, 36, 0);
         gl2.enableVertexAttribArray(1); gl2.vertexAttribPointer(1, 4, gl2.FLOAT, false, 36, 12);
         gl2.enableVertexAttribArray(2); gl2.vertexAttribPointer(2, 2, gl2.FLOAT, false, 36, 28);
-        gl2.uniform3f(u.uCamRel, 0, 0, 0); gl2.bindTexture(gl2.TEXTURE_2D, this.signTex);
+        gl2.uniform3f(u.uCamRel, 0, 0, 0); gl2.uniform2f(u.uOrg, 0, 0); gl2.bindTexture(gl2.TEXTURE_2D, this.signTex);
         gl2.drawArrays(gl2.TRIANGLES, 0, sv.length / 9); tris += sv.length / 27;
         gl2.bindTexture(gl2.TEXTURE_2D, this.white);
       }
       gl.bindVertexArray(null);
       this.stats.drawn = drawn; this.stats.tris = tris;
-      return { canvas: this.cv, heading: ((ph / D2R) % 360 + 360) % 360, lateral: own.camLat, built: s.chunks.size, pose };
+      return { canvas: this.cv, heading: ((ph / D2R) % 360 + 360) % 360, lateral: own.camLat, built: s.chunks.size, pose, camH };
+    }
+    /** the car avatar (and its contact shadow) as camera-relative dynamic vertices: x y z, r g b a, u v */
+    _car(cam, s, camPose, zOf, camH, lat) {
+      const AV = MP.avatar; if (!AV) return null;
+      const a = Math.min(s.route.total, cam.along), p = s.path.pose(a, lat), sc = cam.car.scale || 1.2;
+      const fx = Math.sin(p.psi), fy = Math.cos(p.psi), rx = Math.cos(p.psi), ry = -Math.sin(p.psi);
+      const ox = p.x - camPose.x, oy = p.y - camPose.y, gz = zOf(a) - camH;
+      const src = AV.build(cam.car.paint, cam.car.brake), sh = [];
+      for (let k = 0; k < 8; k++) {   // contact shadow: a dark octagon under the car, above the road paint
+        const a0 = (k / 8) * 6.2832 + 0.3927, a1 = ((k + 1) / 8) * 6.2832 + 0.3927, P = (t) => [Math.cos(t) * 1.28, Math.sin(t) * 2.95, 0.46];
+        for (const q of [[0, 0, 0.46], P(a0), P(a1)]) sh.push(q[0], q[1], q[2], 0.035, 0.038, 0.045, 0, -1, -1);
+      }
+      const out = new Float32Array(src.length + sh.length), put = (arr, off) => {
+        for (let i = 0; i < arr.length; i += 9) {
+          const lx = arr[i] * sc, ly = arr[i + 1] * sc, lz = arr[i + 2] * sc, o = off + i;
+          out[o] = ox + rx * lx + fx * ly; out[o + 1] = oy + ry * lx + fy * ly; out[o + 2] = gz + lz;
+          for (let j = 3; j < 9; j++) out[o + j] = arr[i + j];
+        }
+      };
+      put(sh, 0); put(src, sh.length); return out;
     }
     _viewDir(w, ph) { const s = Math.sin(ph), c = Math.cos(ph); return [w[0] * c - w[1] * s, w[2], w[0] * s + w[1] * c]; }
   }
