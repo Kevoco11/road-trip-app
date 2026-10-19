@@ -198,6 +198,16 @@
     return res;
   };
 
+  /** only the streets of every loaded tile that overlaps bb (route metres) — what the live map-matcher needs, once per GPS fix */
+  W.queryRoads = function (frame, bb) {
+    const out = [];
+    for (const [x, y] of W.tilesFor(frame, bb)) {
+      const t = W.tiles.get(keyOf(x, y)); if (!t || t.state !== 'ok') continue;
+      for (const r of localize(t.data, frame).roads) if (!(r.bb[2] < bb[0] || r.bb[0] > bb[2] || r.bb[3] < bb[1] || r.bb[1] > bb[3])) out.push(r);
+    }
+    return out;
+  };
+
   /* ------------------------------------------------------------------ loading */
   let inflight = 0; const queue = [];
   function touch(k) { const t = W.tiles.get(k); if (t) { W.tiles.delete(k); W.tiles.set(k, t); } }

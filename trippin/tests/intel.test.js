@@ -324,7 +324,7 @@ t('parking a little way from the route end is still just "arrived"', () => {
   for (let k = 0; k < 20; k++) fixAt({ lat: p.lat, lng: p.lng }, ts += 1000, { speed: 0 });
   ok(S.d.arrived); eq(S.d.beyond, false); E.endTrip();
 });
-t('leaving the planned road: street view after a moment, "off route" after 8 s; one bad fix does neither', () => {
+t('leaving the planned road: street view after a moment, "off route" after 3 s of being far from it; one bad fix does neither', () => {
   const r = freshDrive(); let ts = 1e12;
   const at = (a, offM) => { const p = r.pointAt(a), q = MP.geo.destination(p.lat, p.lng, p.bearing + 90, offM); return { lat: q.lat, lng: q.lng, bearing: p.bearing }; };
   for (let a = 2000; a < 2100; a += 12) fixAt(r.pointAt(a), ts += 1000);
@@ -336,6 +336,36 @@ t('leaving the planned road: street view after a moment, "off route" after 8 s; 
   eq(S.d.offRoute, true);
   for (let a = 2200; a < 2260; a += 12) fixAt(r.pointAt(a), ts += 1000);
   eq(S.d.street, false, 'back on the route'); eq(S.d.offRoute, false); E.endTrip();
+});
+t('a wrong turn is noticed in two fixes: off the road AND pointing away from it (not after a long walk)', () => {
+  const r = freshDrive(); let ts = 1e12;
+  const side = (a, offM, hdgRel) => { const p = r.pointAt(a), q = MP.geo.destination(p.lat, p.lng, p.bearing + 90, offM); return { lat: q.lat, lng: q.lng, bearing: (p.bearing + hdgRel + 360) % 360 }; };
+  for (let a = 2000; a < 2100; a += 9) fixAt(r.pointAt(a), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, false);
+  fixAt(side(2108, 10, 90), ts += 1000, { speed: 9 }); eq(S.d.offRoute, false, 'one fix is not enough');
+  fixAt(side(2110, 20, 90), ts += 1000, { speed: 9 }); eq(S.d.offRoute, true, 'the second fix off the road and facing away from it starts the re-route');
+  for (let a = 2200; a < 2300; a += 9) fixAt(r.pointAt(a), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, false, 'back on the route'); E.endTrip();
+});
+t('not a wrong turn: a parallel road facing the same way, a stray fix, or parking beside the route', () => {
+  const r = freshDrive(); let ts = 1e12;
+  const side = (a, offM, hdgRel) => { const p = r.pointAt(a), q = MP.geo.destination(p.lat, p.lng, p.bearing + 90, offM); return { lat: q.lat, lng: q.lng, bearing: (p.bearing + hdgRel + 360) % 360 }; };
+  for (let a = 2000; a < 2100; a += 9) fixAt(r.pointAt(a), ts += 1000, { speed: 9 });
+  for (let k = 0; k < 20; k++) fixAt(side(2100 + k * 9, 16, 0), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, false, 'a road 16 m beside the route, same direction');
+  fixAt(side(2300, 14, 100), ts += 1000, { speed: 9 }); fixAt(r.pointAt(2310), ts += 1000, { speed: 9 }); fixAt(side(2320, 14, 100), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, false, 'stray fixes that are not two in a row');
+  for (let k = 0; k < 20; k++) fixAt(side(2400, 15, 90), ts += 1000, { speed: 0 });
+  eq(S.d.offRoute, false, 'parked 15 m from the route'); E.endTrip();
+});
+t('driving back the way the route came (a U-turn) is "off route" after three seconds', () => {
+  const r = freshDrive(); let ts = 1e12;
+  for (let a = 2000; a < 2100; a += 9) fixAt(r.pointAt(a), ts += 1000, { speed: 9 });
+  const back = (a) => { const p = r.pointAt(a); return { lat: p.lat, lng: p.lng, bearing: (p.bearing + 180) % 360 }; };
+  for (let k = 0; k < 2; k++) fixAt(back(2100 - k * 9), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, false, 'not yet');
+  for (let k = 2; k < 6; k++) fixAt(back(2100 - k * 9), ts += 1000, { speed: 9 });
+  eq(S.d.offRoute, true, 'facing the wrong way along the plan'); E.endTrip();
 });
 t('a new route mid-drive starts from where the car is on it (old progress used to stay pinned)', () => {
   const r = freshDrive(); let ts = Date.now();

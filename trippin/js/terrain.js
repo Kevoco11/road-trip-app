@@ -578,8 +578,18 @@
         }
       }
     }
-    // navigation guidance: chevrons down the lane the car rides, every 9 m (alpha 192 = "guide": the shader pulses them forward and fades them with distance).
-    // They are the route itself — nothing is drawn for a free drive, where there is no destination.
+    // navigation guidance, part 1: the route ribbon — a soft halo (tag 170) and a bright core (tag 176) down the lane the car rides, the line a navigation app
+    // draws. It follows the smoothed path through every turn, so the way through a junction is drawn before the car gets there. It is the route itself:
+    // nothing is drawn for a free drive, where there is no destination.
+    if (!route.free) {
+      const cHalo = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 170), cCore = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 176);
+      for (let i = 0; i + 1 < slices.length; i++) {
+        const lat = secs[i].cam;
+        band(i, lat - 1.05, lat + 1.05, lz + 0.02, cHalo);
+        band(i, lat - 0.34, lat + 0.34, lz + 0.035, cCore);
+      }
+    }
+    // navigation guidance, part 2: chevrons down the lane the car rides, every 9 m (alpha 192 = "guide": the shader pulses them forward and fades them with distance).
     if (!route.free) {
       const cg = pack(PAL.asphalt[0], PAL.asphalt[1], PAL.asphalt[2], 192), zg = lz + 0.05;
       for (let ga = Math.ceil(a0 / 9) * 9; ga < a1 - 2; ga += 9) {

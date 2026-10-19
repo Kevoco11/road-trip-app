@@ -7,6 +7,10 @@
  *   4. draws exit gantries / roadside signs as real textured panels, so hills and buildings hide them correctly.
  * The 2D Scene then composites the result between its sky and its weather/glare overlays.
  *
+ * The camera is free: with `cam.pose` (the live GPS pose from livepose.js, in route metres) it sits behind the car wherever
+ * the car really is and faces where it really faces; the route only decides which chunks exist and how high the ground is.
+ * Without a pose (Future-You thumbnail, time-travel preview) it rides the route's centre-line as it always did.
+ *
  * If WebGL2 is unavailable (or the context is lost) `render()` returns null and Scene falls back to its flat 2D road.
  */
 (function (root) {
@@ -16,7 +20,7 @@
   const T = () => MP.terrain;
 
   /* Material tags ride in the vertex alpha (0..255): 0 ground/plain · 30 asphalt · 64 building wall (windows) · 90 foliage · 128 lamp (emissive)
-   * · 192 navigation guide · 255 retro-reflective paint. Everything else about a surface (grain, glass, sheen) is decided here per pixel. */
+   * · 192 navigation guide (chevrons) · 170/176 route ribbon halo/core · 255 retro-reflective paint. Everything else about a surface (grain, glass, sheen) is decided here per pixel. */
   const VS = `#version 300 es
 in vec3 aPos; in vec4 aCol; in vec2 aUV;
 uniform vec3 uCamRel; uniform vec2 uDir; uniform vec3 uProj; uniform vec2 uNF;
@@ -45,14 +49,15 @@ void main(){
   float em = step(0.4, a)*step(a, 0.6), refl = step(0.9, a);
   float mAsph = step(0.08, a)*step(a, 0.16), mWall = step(0.2, a)*step(a, 0.3), mFol = step(0.31, a)*step(a, 0.4), mGuide = step(0.7, a)*step(a, 0.8);
   float mPaint = step(0.61, a)*step(a, 0.66), mLamp = step(0.84, a)*step(a, 0.9);
+  float mRibA = step(0.664, a)*step(a, 0.680), mRibB = step(0.683, a)*step(a, 0.698);   // route ribbon: halo and core
   vec3 base = vCol.rgb; bool tex = vUV.x >= 0.0;
-  if (tex) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; em = 0.0; mAsph = 0.0; mWall = 0.0; mFol = 0.0; mGuide = 0.0; mPaint = 0.0; mLamp = 0.0; }
+  if (tex) { vec4 t = texture(uTex, vUV); if (t.a < 0.5) discard; base = t.rgb; refl = 1.0; em = 0.0; mAsph = 0.0; mWall = 0.0; mFol = 0.0; mGuide = 0.0; mPaint = 0.0; mLamp = 0.0; mRibA = 0.0; mRibB = 0.0; }
   float dist = length(vView); vec3 vd = vView / dist;
   vec3 n = -normalize(cross(dFdx(vView), dFdy(vView)));
   if (dot(n, vView) > 0.0) n = -n;
   vec3 nw = normalize(cross(dFdx(vLoc), dFdy(vLoc)));       // the same flat normal in world axes (z up); only its direction matters
   float up = abs(nw.z); vec2 wp = vLoc.xy + uOrg;
-  float plain = (!tex && em < 0.5 && refl < 0.5 && mWall < 0.5 && mFol < 0.5 && mAsph < 0.5 && mGuide < 0.5 && mPaint < 0.5 && mLamp < 0.5) ? 1.0 : 0.0;
+  float plain = (!tex && em < 0.5 && refl < 0.5 && mWall < 0.5 && mFol < 0.5 && mAsph < 0.5 && mGuide < 0.5 && mPaint < 0.5 && mLamp < 0.5 && mRibA + mRibB < 0.5) ? 1.0 : 0.0;
   // ground: fine grain that fades before it can shimmer, plus slow patchiness (mown strips, worn turf, bare soil) that does not
   if (plain > 0.5 && up > 0.92) {
     float fade = 1.0 - smoothstep(35.0, 240.0, dist);
@@ -93,6 +98,10 @@ void main(){
   c = mix(c, base, em*clamp((uHead - 0.2)*4.0, 0.0, 1.0));   // lamps come on as the daylight goes
   if (mLamp > 0.5) c = base*1.15;                              // lamps that are lit right now (brake lights)
   c = tone(c*1.22);
+  if (mRibA + mRibB > 0.5) {   // the route ribbon: a steady glow with a slow pulse running forward, strong near the car, fading into the haze
+    float pulse = 0.5 + 0.5*sin(dist*0.16 - uTime*3.2), f = (1.0 - smoothstep(260.0, 1000.0, dist))*smoothstep(9.0, 15.0, dist);   // grows out of the position puck (9.5 m ahead of the camera)
+    c = mix(c, uGuide, clamp((mRibA*(0.30 + 0.09*pulse) + mRibB*(0.68 + 0.18*pulse))*f, 0.0, 0.92));
+  }
   if (mGuide > 0.5) {   // the way ahead: chevrons that flow forward along your lane
     float k = (1.0 - smoothstep(140.0, 430.0, dist))*smoothstep(16.0, 32.0, dist)*(0.62 + 0.38*sin(dist*0.42 - uTime*5.0));
     c = mix(c, uGuide, clamp(k, 0.0, 0.96));
@@ -245,22 +254,32 @@ void main(){
 
       // camera: a chase cam 5 m behind the car (the phone is at the driver's seat, not the bumper), in its lane, 3.2 m up. It was 9 m:
       // every junction then slid out of sight about half a second after the car had really passed it
-      const camBack = cam.camBack != null ? cam.camBack : 5, camH = cam.camH != null ? cam.camH : 3.2, A = Math.max(0, cam.along - camBack);
-      const kc = Math.floor(A / CH), cc = s.chunks.get(kc);
-      const wantLat = T().camOffset(cc, A);
+      const camBack = cam.camBack != null ? cam.camBack : 5, camH = cam.camH != null ? cam.camH : 3.2, live = cam.pose || null;
       const own = cam.owner || this;   // lane offset eases per Scene (the Drive view and the Future-You thumbnail must not fight over it)
-      own.camLat = own.camLat == null || cam.snap ? wantLat : own.camLat + (wantLat - own.camLat) * (1 - Math.exp(-(dt || 0.033) / 0.45));
-      const pose = s.path.pose(A, own.camLat);
+      let A, pose;
+      if (live) {
+        // free camera: behind the car along ITS heading, wherever it is. `cam.along` is the route distance nearest the car (chunks, ground height)
+        A = Math.max(0, Math.min(route.total, cam.along));
+        pose = { x: live.x - Math.sin(live.psi) * camBack, y: live.y - Math.cos(live.psi) * camBack, psi: live.psi };
+        own.camLat = null;
+      } else {
+        A = Math.max(0, cam.along - camBack);
+        const wantLat = T().camOffset(s.chunks.get(Math.floor(A / CH)), A);
+        own.camLat = own.camLat == null || cam.snap ? wantLat : own.camLat + (wantLat - own.camLat) * (1 - Math.exp(-(dt || 0.033) / 0.45));
+        pose = s.path.pose(A, own.camLat);
+      }
+      const kc = Math.floor(A / CH), cc = s.chunks.get(kc);
 
       // scenery tiles: under the car and ahead
       const pts = []; for (const d of [0, 500, 1000, 1600, 2300]) { const pp = s.path.pose(Math.min(route.total, A + d)); pts.push({ lat: pp.y / route.ky, lng: pp.x / route.kx }); }
+      if (live) for (const d of [0, 250, 700]) pts.push({ lat: (live.y + Math.cos(live.psi) * d) / route.ky, lng: (live.x + Math.sin(live.psi) * d) / route.kx });   // and the way the car is really pointing
       if (!cam.noWorld && MP.world) MP.world.want(pts, !!cam.snap);
       // street cells (signals, lanes, limits) come from a slower service: ask further ahead so they are here before the car is
       if (!cam.noWorld && MP.street) { const far = pts.slice(); for (const d of [3600, 5200, 7500]) { const pp = s.path.pose(Math.min(route.total, A + d)); far.push({ lat: pp.y / route.ky, lng: pp.x / route.kx }); } MP.street.want(far, !!cam.snap); }
 
       // which chunks are in view; build the missing / stale ones, nearest first, a few milliseconds per frame
       // (a jump — first frame, time-travel scrub — builds the two nearest synchronously so the view is never empty)
-      const view = Math.min(cam.view || 2600, this.quality >= 2 ? 1e9 : this.quality === 1 ? 1800 : 1200), k0 = Math.max(0, Math.floor((A - 80) / CH)), k1 = Math.min(Math.floor((route.total - 1e-6) / CH), Math.floor((A + view) / CH));
+      const view = Math.min(cam.view || 2600, this.quality >= 2 ? 1e9 : this.quality === 1 ? 1800 : 1200), back = live ? 560 : 80, k0 = Math.max(0, Math.floor((A - back) / CH)), k1 = Math.min(Math.floor((route.total - 1e-6) / CH), Math.floor((A + view) / CH));
       const ctx = { elevAt: cam.elevAt, month: cam.month, noWorld: cam.noWorld };
       const order = []; for (let k = k0; k <= k1; k++) order.push(k); order.sort((a, b) => Math.abs(a - kc) - Math.abs(b - kc));
       const needs = (k) => { const c = s.chunks.get(k); return !c || (!cam.noWorld && this._sigNow(c, cam.elevAt) !== c.sig); };
@@ -288,7 +307,7 @@ void main(){
       gl.uniform1f(u.uWet, L.wet || 0); gl.uniform1f(u.uTime, (cam.t || 0) % 1000); gl.uniform3fv(u.uGuide, L.guide || [0.24, 0.96, 0.66]);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.white); gl.uniform1i(u.uTex, 0);
       let tris = 0, drawn = 0;
-      const chunks = [...s.chunks.values()].filter((c) => c.a1 > A - 120 && c.a0 < A + view).sort((p, q) => Math.abs(p.k - kc) - Math.abs(q.k - kc));
+      const chunks = [...s.chunks.values()].filter((c) => c.a1 > A - (live ? 560 : 120) && c.a0 < A + view).sort((p, q) => Math.abs(p.k - kc) - Math.abs(q.k - kc));
       for (const c of chunks) {
         // camera relative to the chunk origin, in doubles
         const cz = (z0cam - c.origin.z) * EX + camH;
@@ -301,11 +320,11 @@ void main(){
       // signs (dynamic, camera-relative)
       const zOf = (a) => (elevRaw(a) - z0cam) * EX;
       const ahead = [];
-      if (!cam.noWorld) for (const c of chunks) for (const J of c.junctions || []) { const d = J.a - cam.along; if (J.name && d > 6 && d < 420) ahead.push({ kind: 'street', d: d + J.half + 2.5, text: blade(J.name), sub: '', side: 'right', j: J }); }
+      if (!cam.noWorld && (!live || live.kind === 'route')) for (const c of chunks) for (const J of c.junctions || []) { const d = J.a - cam.along; if (J.name && d > 6 && d < 420) ahead.push({ kind: 'street', d: d + J.half + 2.5, text: blade(J.name), sub: '', side: 'right', j: J }); }
       ahead.sort((p, q) => p.d - q.d);
       this.junctionsAhead = ahead.map((g) => ({ d: g.j.a - cam.along, name: g.j.name, signal: g.j.signal, stop: g.j.stop }));
       let sv = this._signs((cam.signs || []).slice(0, 4).concat(ahead.slice(0, 4)), { x: pose.x, y: pose.y }, s, { along: cam.along, zOf, camH, edge: 6.5 });
-      const carV = cam.car ? this._car(cam, s, pose, zOf, camH, own.camLat) : null;
+      const carV = cam.puck && live ? this._puck(live, pose, zOf(A), camH, cam.puck) : null;
       if (carV) { if (sv) { const m = new Float32Array(sv.length + carV.length); m.set(sv); m.set(carV, sv.length); sv = m; } else sv = carV; }
       if (sv) {
         const gl2 = gl; if (!this.signVao) { this.signVao = gl2.createVertexArray(); this.signBuf = gl2.createBuffer(); }
@@ -319,27 +338,27 @@ void main(){
       }
       gl.bindVertexArray(null);
       this.stats.drawn = drawn; this.stats.tris = tris;
-      return { canvas: this.cv, heading: ((ph / D2R) % 360 + 360) % 360, lateral: own.camLat, built: s.chunks.size, pose, camH };
+      return { canvas: this.cv, heading: ((ph / D2R) % 360 + 360) % 360, lateral: own.camLat, built: s.chunks.size, pose, camH, free: !!live };
     }
-    /** the car avatar (and its contact shadow) as camera-relative dynamic vertices: x y z, r g b a, u v */
-    _car(cam, s, camPose, zOf, camH, lat) {
-      const AV = MP.avatar; if (!AV) return null;
-      const a = Math.min(s.route.total, cam.along), p = s.path.pose(a, lat), sc = cam.car.scale || 1.2;
-      const fx = Math.sin(p.psi), fy = Math.cos(p.psi), rx = Math.cos(p.psi), ry = -Math.sin(p.psi);
-      const ox = p.x - camPose.x, oy = p.y - camPose.y, gz = zOf(a) - camH;
-      const src = AV.build(cam.car.paint, cam.car.brake), sh = [];
-      for (let k = 0; k < 8; k++) {   // contact shadow: a dark octagon under the car, above the road paint
-        const a0 = (k / 8) * 6.2832 + 0.3927, a1 = ((k + 1) / 8) * 6.2832 + 0.3927, P = (t) => [Math.cos(t) * 1.28, Math.sin(t) * 2.95, 0.46];
-        for (const q of [[0, 0, 0.46], P(a0), P(a1)]) sh.push(q[0], q[1], q[2], 0.035, 0.038, 0.045, 0, -1, -1);
-      }
-      const out = new Float32Array(src.length + sh.length), put = (arr, off) => {
-        for (let i = 0; i < arr.length; i += 9) {
-          const lx = arr[i] * sc, ly = arr[i + 1] * sc, lz = arr[i + 2] * sc, o = off + i;
-          out[o] = ox + rx * lx + fx * ly; out[o + 1] = oy + ry * lx + fy * ly; out[o + 2] = gz + lz;
-          for (let j = 3; j < 9; j++) out[o + j] = arr[i + j];
-        }
+    /** the position puck: where the car is, as a flat, always-lit arrow on the road (camera-relative dynamic vertices: x y z, r g b a, u v).
+     *  Tag 224 = a surface the shader leaves unlit, so it reads the same by day and by night. It carries no claim about the car itself. */
+    _puck(live, camPose, groundZ, camH, o) {
+      const fx = Math.sin(live.psi), fy = Math.cos(live.psi), rx = Math.cos(live.psi), ry = -Math.sin(live.psi);
+      const ox = live.x - camPose.x, oy = live.y - camPose.y, gz = groundZ - camH + 0.62, out = [];
+      const col = o.color || [0.30, 0.95, 0.74], rim = [0.02, 0.05, 0.08], wht = [0.93, 1, 0.98];
+      const K = o.scale || 0.8;   // metres per puck unit
+      const P = (lx, ly, z) => [ox + rx * lx * K + fx * ly * K, oy + ry * lx * K + fy * ly * K, gz + z];
+      const tri = (a, b, c, k) => { for (const p of [a, b, c]) out.push(p[0], p[1], p[2], k[0], k[1], k[2], 224 / 255, -1, -1); };
+      // arrow outline (dark, slightly larger), body, and a bright core: three layers a few mm apart so it stays crisp
+      const shape = (sc, z, k) => {
+        const tip = P(0, 2.5 * sc, z), l = P(-1.55 * sc, -1.35 * sc, z), r = P(1.55 * sc, -1.35 * sc, z), n = P(0, -0.25 * sc, z);
+        tri(tip, l, n, k); tri(tip, n, r, k);
       };
-      put(sh, 0); put(src, sh.length); return out;
+      shape(1.28, 0.0, rim); shape(1.0, 0.03, col); shape(0.46, 0.06, wht);
+      // a soft pulse ring under it (opaque, thin): the eye finds the car at once
+      const ring = (r0, r1, z, k) => { for (let s = 0; s < 20; s++) { const a0 = (s / 20) * 6.2832, a1 = ((s + 1) / 20) * 6.2832; const A = P(Math.cos(a0) * r0, Math.sin(a0) * r0, z), B = P(Math.cos(a1) * r0, Math.sin(a1) * r0, z), C = P(Math.cos(a1) * r1, Math.sin(a1) * r1, z), D = P(Math.cos(a0) * r1, Math.sin(a0) * r1, z); tri(A, B, C, k); tri(A, C, D, k); } };
+      ring(2.55, 2.85, -0.02, col);
+      return new Float32Array(out);
     }
     _viewDir(w, ph) { const s = Math.sin(ph), c = Math.cos(ph); return [w[0] * c - w[1] * s, w[2], w[0] * s + w[1] * c]; }
   }

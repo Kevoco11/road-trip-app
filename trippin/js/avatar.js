@@ -1,5 +1,8 @@
 /* AVATAR — the car you are driving, drawn on its own road in the chase view.
  *
+ * RETIRED for now (not loaded by index.html): the chase view marks the car with a navigation puck instead (glscene.js _puck).
+ * Kept, with its test, so a better model can come back later.
+ *
  *   MP.avatar.build(paint, brake) → Float32Array of vertices, 9 floats each (x y z, r g b a, u v), in car-local metres:
  *                                   x right, y forward, z up, origin on the ground at the middle of the car.
  *

@@ -37,6 +37,8 @@
     onSpeech(text, isFinal) { api.emit('speech', text, !!isFinal); },
     onSpeechEnd(err) { api.emit('speechEnd', err || ''); },
     onTtsDone() { api.emit('ttsDone'); },
+    /** the car's yaw rate from the gyroscope (rad/s, clockwise positive) averaged over dt seconds — only while a trip runs (see MainActivity.startMotion) */
+    onYaw(rate, dt) { api.emit('yaw', rate, dt); },
     /** Android back button: returns true if the page handled it (closed a sheet/HUD, or left a tab for Drive) */
     handleBack() {
       const hud = MP.hud && MP.hud.isOpen && MP.hud.isOpen();

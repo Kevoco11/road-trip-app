@@ -3,7 +3,7 @@
      nothing here is shipped. Drive it from Playwright: await window.shot({along, h, m, wx, signs}) then screenshot #c. -->
 <style>@font-face{font-family:"Barlow Condensed";font-weight:600;src:url(../fonts/BarlowCondensed-600.woff2)}@font-face{font-family:"Barlow Condensed";font-weight:800;src:url(../fonts/BarlowCondensed-800.woff2)}
 body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:block}</style></head><body><canvas id="c"></canvas>
-<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/avatar.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
+<script src="../js/core.js"></script><script src="../js/sky.js"></script><script src="../js/mvt.js"></script><script src="../js/pmtiles.js"></script><script src="../js/path.js"></script><script src="../js/world.js"></script><script src="../js/street.js"></script><script src="../js/terrain.js"></script><script src="../js/freeroad.js"></script><script src="../js/livepose.js"></script><script src="../js/glscene.js"></script><script src="../js/scene.js"></script>
 <script>
 (async () => {
   const route = MP.Route.fromOSRM(await (await fetch('fixtures/osrm-sterling.json')).json(), ['Start', 'End']);
@@ -29,7 +29,20 @@ body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:blo
     o = o || {};
     const along = o.along || 0, p = route.pointAt(along), ms = Date.UTC(2026, 9, 12, (o.h == null ? 14 : o.h) + 4, o.m || 0);
     const wx = o.wx || { cloud: 0.3 };
-    const st = () => ({ ms, lat: p.lat, lng: p.lng, heading: p.bearing, along, route, speed: 12, wx, elevAt: o.flat ? null : elev, signs: o.signs || [], hy: o.hy || 250 });
+    // o.live = { along, side (m, + right of the route), turn (deg, relative to the route's bearing) }: the car is at a REAL GPS position off the route, drawn by the live pose (free camera + puck)
+    let lp = null, lenv = null, gps = null;
+    if (o.live) {
+      const q = route.pointAt(o.live.along), b = q.bearing * Math.PI / 180, side = o.live.side || 0, frame = { kx: route.kx, ky: route.ky };
+      const x = q.lng * route.kx + Math.cos(b) * side, y = q.lat * route.ky - Math.sin(b) * side;
+      gps = { lat: y / route.ky, lng: x / route.kx, ts: Date.now() - 300, speed: o.live.speed != null ? o.live.speed : 12, heading: ((q.bearing + (o.live.turn || 0)) % 360 + 360) % 360, acc: 5, accel: 0 };
+      lp = new MP.livepose.LivePose(); const sp = MP.glworld.state(route).path;
+      lenv = { frame, route, stale: false, laneOf: MP.livepose.laneOf, routePose: (a) => sp.pose(a, 1.8), roads: (bb) => MP.world.queryRoads(frame, bb) };
+    }
+    const st = () => {
+      if (!lp) return { ms, lat: p.lat, lng: p.lng, heading: p.bearing, along, route, speed: 12, wx, elevAt: o.flat ? null : elev, signs: o.signs || [], hy: o.hy || 250, chase: !!o.chase };
+      const q = lp.frame(gps, lenv, Date.now(), 0.033);
+      return { ms, lat: q.lat, lng: q.lng, heading: ((q.psi * 180 / Math.PI) % 360 + 360) % 360, along: q.along, route, pose: { x: q.x, y: q.y, psi: q.psi, kind: q.kind }, speed: 12, wx, elevAt: o.flat ? null : elev, signs: [], hy: o.hy || 250, chase: o.chase !== false, live: true };
+    };
     sc.noWorld = !!o.noWorld; sc._lastAlong = null; sc.camOverride = o.cam || null;
     MP.world.want([p], true); MP.street.want([p], true);
     for (let i = 0; i < 40; i++) {
@@ -41,7 +54,8 @@ body{margin:0;background:#222;color:#ddd;font:12px sans-serif}canvas{display:blo
     }
     sc.render(st(), 0.033);
     const gw = MP.glworld;
-    return { ok: gw.ok, err: gw.lastErr, stats: gw.stats, along: Math.round(along), lat: sc.camLat, total: Math.round(route.total) };
+    const fin = st();
+    return { ok: gw.ok, err: gw.lastErr, stats: gw.stats, along: Math.round(along), lat: sc.camLat, total: Math.round(route.total), pose: fin.pose ? { kind: fin.pose.kind, hdg: Math.round(fin.heading), along: Math.round(fin.along), cands: lp ? lp.cands : '' } : null };
   };
   window.ready = true;
 })();

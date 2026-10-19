@@ -16,6 +16,10 @@ import android.bluetooth.le.ScanResult;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -67,6 +71,12 @@ public class MainActivity extends Activity {
     private Runnable afterPerms;
     private GeolocationPermissions.Callback pendingGeo;
     private String pendingGeoOrigin;
+    private SensorManager sensors;
+    private SensorEventListener motionListener;
+    private final float[] grav = new float[3];
+    private boolean haveGrav = false;
+    private long lastYawNs = 0, lastPushNs = 0;
+    private double yawAcc = 0;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -146,10 +156,60 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopMotion();
         Bridge.closeGatt();
         if (recognizer != null) { recognizer.destroy(); recognizer = null; }
         if (tts != null) { tts.stop(); tts.shutdown(); }
         super.onDestroy();
+    }
+
+    /**
+     * The car's yaw rate for the live camera. The phone turns with the car, so the gyroscope's rotation vector projected on gravity is the
+     * car's turn rate about the vertical whatever way the phone is mounted. It is pushed to the page ~20 times a second as the bearing rate
+     * (rad/s, clockwise positive) while a trip runs; the page checks it against the GPS heading before it believes it. (The WebView itself
+     * does not deliver devicemotion events, hence this bridge.)
+     */
+    private void startMotion() {
+        if (motionListener != null) return;
+        sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
+        if (sensors == null) return;
+        final Sensor gyro = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        if (gyro == null) return;
+        final Sensor gv = sensors.getDefaultSensor(Sensor.TYPE_GRAVITY), acc = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        if (gv == null && acc == null) return;
+        haveGrav = false; lastYawNs = 0; lastPushNs = 0; yawAcc = 0;
+        motionListener = new SensorEventListener() {
+            @Override public void onSensorChanged(SensorEvent e) {
+                int t = e.sensor.getType();
+                if (t == Sensor.TYPE_GRAVITY) { grav[0] = e.values[0]; grav[1] = e.values[1]; grav[2] = e.values[2]; haveGrav = true; return; }
+                if (t == Sensor.TYPE_ACCELEROMETER) {   // no gravity sensor on this phone: a slow low-pass of the accelerometer (the car's own accelerations average out)
+                    if (!haveGrav) { grav[0] = e.values[0]; grav[1] = e.values[1]; grav[2] = e.values[2]; haveGrav = true; }
+                    else for (int i = 0; i < 3; i++) grav[i] += 0.03f * (e.values[i] - grav[i]);
+                    return;
+                }
+                if (!haveGrav) return;
+                double gl = Math.sqrt(grav[0] * grav[0] + grav[1] * grav[1] + grav[2] * grav[2]);
+                if (gl < 6.0) return;
+                double wUp = (e.values[0] * grav[0] + e.values[1] * grav[1] + e.values[2] * grav[2]) / gl;   // rad/s about "up", counter-clockwise from above
+                if (lastYawNs != 0) { double dt = (e.timestamp - lastYawNs) / 1e9; if (dt > 0 && dt < 0.2) yawAcc += -wUp * dt; }   // bearing grows clockwise
+                lastYawNs = e.timestamp;
+                if (lastPushNs == 0) { lastPushNs = e.timestamp; return; }
+                double span = (e.timestamp - lastPushNs) / 1e9;
+                if (span >= 0.05) {
+                    double rate = yawAcc / span; yawAcc = 0; lastPushNs = e.timestamp;
+                    if (!Double.isNaN(rate) && !Double.isInfinite(rate)) js("MPN.onYaw(" + rate + "," + span + ")");
+                }
+            }
+            @Override public void onAccuracyChanged(Sensor s, int a) { }
+        };
+        sensors.registerListener(motionListener, gyro, SensorManager.SENSOR_DELAY_GAME);
+        if (gv != null) sensors.registerListener(motionListener, gv, SensorManager.SENSOR_DELAY_GAME);
+        else sensors.registerListener(motionListener, acc, SensorManager.SENSOR_DELAY_GAME);
+    }
+
+    private void stopMotion() {
+        if (motionListener != null && sensors != null) sensors.unregisterListener(motionListener);
+        motionListener = null; haveGrav = false;
     }
 
     private void js(final String code) {
@@ -229,6 +289,9 @@ public class MainActivity extends Activity {
             ui.post(() -> { if (recognizer != null) recognizer.cancel(); });
         }
 
+        @JavascriptInterface public void motion(final boolean on) {
+            ui.post(() -> { if (on) startMotion(); else stopMotion(); });
+        }
         @JavascriptInterface public void keepAwake(final boolean on) {
             ui.post(() -> { if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); });
         }

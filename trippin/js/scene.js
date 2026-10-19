@@ -20,8 +20,8 @@
   const rgb = sky.rgb, mix = sky.mix;
   const D2R = Math.PI / 180;
 
-  /** the chase view: the camera rides behind and above the car, which is drawn on the road (the default view; "cockpit" is the windscreen view) */
-  const CHASE = { h: 4.1, b: 12.5, scale: 1.1 };
+  /** the chase view: the camera rides behind and above the car, whose place is marked by a puck on the road (the default view; "cockpit" is the windscreen view) */
+  const CHASE = { h: 4.2, b: 9.5 };   // (the car model is retired for now: the chase view shows a position puck on the road instead)
   function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
 
   class Scene {
@@ -68,8 +68,8 @@
         light = this._light(sun, pal, gray, fogAmt, hor, fogD); light.wet = wet;
         const jump = this._lastAlong == null || Math.abs((st.along || 0) - this._lastAlong) > 250 || this._lastRoute !== route;
         this._lastAlong = st.along || 0; this._lastRoute = route;
-        glr = MP.glworld.render({ route, along: st.along || 0, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, t: this.t, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb && st.live !== false, camH: this.camOverride ? this.camOverride.h : st.chase ? CHASE.h : undefined, camBack: this.camOverride ? this.camOverride.b : st.chase ? CHASE.b : undefined /* camOverride: test-bench hook */,
-          car: st.chase && !this.isThumb ? { paint: st.carPaint, brake: !!st.brake, scale: CHASE.scale } : null }, dt);
+        glr = MP.glworld.render({ route, along: st.along || 0, pose: st.pose || null, elevAt: st.elevAt, W, H, dpr, hy, F: f, month: new Date(st.ms).getMonth(), signs: st.signs, light, t: this.t, owner: this, snap: jump, view: this.isThumb ? 1100 : 2600, noWorld: !!(this.noWorld || st.noWorld), live: !this.isThumb && st.live !== false, camH: this.camOverride ? this.camOverride.h : st.chase ? CHASE.h : undefined, camBack: this.camOverride ? this.camOverride.b : st.chase ? CHASE.b : undefined /* camOverride: test-bench hook */,
+          puck: st.chase && !this.isThumb && st.pose ? {} : null }, dt);
       }
       hdg = glr ? glr.heading : (st.heading || 0);
 

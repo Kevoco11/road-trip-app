@@ -125,7 +125,7 @@
     MP.bus.on('route', () => { mv.setRoute(S.route); rebuildMarkers(); D.rebuildF(true); D.updateCamera(true); });
     MP.bus.on('intel', util.throttle(() => { D.rebuildF(true); rebuildMarkers(); }, 2500));
     MP.bus.on('gps', D.onGps);
-    MP.bus.on('trip', () => { D.renderGo(); D.rebuildF(true); D.layout(); D.updateCamera(true); });
+    MP.bus.on('trip', (what) => { if (MP.livepose) { MP.livepose.shared.reset(); MP.livepose.motion(what !== 'end'); } corridor = 'route'; D.renderGo(); D.rebuildF(true); D.layout(); D.updateCamera(true); });
     MP.bus.on('prefs', () => { D.rebuildF(true); D.renderVoice(); });
     MP.bus.on('theme', () => { D.recolor(); D.renderTheme(); });
     MP.bus.on('tick', D.update);
@@ -144,7 +144,7 @@
       const dt = Math.min(0.1, (ts - last) / 1000); last = ts;
       if (el.hidden || document.hidden) return;
       vms.tick(dt);
-      if (mode === 'view' && ts - (D._lastScene || 0) > (S.trip || preview != null ? 33 : 120)) { D._lastScene = ts; D.drawScene(dt); }
+      if (mode === 'view' && ts - (D._lastScene || 0) > (S.trip || preview != null ? 15 : 120)) { D._lastScene = ts; D.drawScene(dt); }
       if (previewHold && Date.now() > previewHold) { previewHold = 0; D.clearPreview(); }
     };
     requestAnimationFrame(loop);
@@ -231,8 +231,43 @@
     const te = a < 0 ? Math.min(t, v / -a) : t;
     return Math.max(0, Math.min(room, v * te + 0.5 * a * te * te));
   }
-  function sceneState() {
+  /* ---- the live camera ----------------------------------------------------------------------------------------------
+   * While a trip runs the windshield is drawn from where the GPS says the car is (livepose.js: dead-reckoned, map-matched
+   * against the planned road AND every other mapped street, smoothed) — not from where the plan says it should be. The plan
+   * only supplies the world around the car and the guidance chevrons, so a turn the plan did not ask for is followed as it
+   * happens. The world is built around the planned road while the car is near it, else around the street it is really on. */
+  let corridor = 'route'; const lpEnvs = new WeakMap();
+  function envFor(route) {
+    let e = lpEnvs.get(route);
+    if (!e) {
+      const frame = { kx: route.kx, ky: route.ky }, GL = MP.glworld, TR = MP.terrain, WD = MP.world;
+      e = lpEnvs.set(route, { frame, route, stale: false, laneOf: MP.livepose.laneOf,
+        routePose: (a) => { const s = GL.state(route); return s.path.pose(a, TR.camOffset(s.chunks.get(Math.floor(a / TR.CH)), a)); },
+        roads: (bb) => (WD ? WD.queryRoads(frame, bb) : []) }).get(route);
+    }
+    return e;
+  }
+  function liveState(dt, hy) {
+    const g = S.gps, d = S.d, plan = S.route && !d.beyond ? S.route : null, now = Date.now();
+    if (plan && corridor === 'free' && (d.off || 0) < 90) corridor = 'route';
+    else if (corridor === 'route' && (!plan || (d.off || 0) > 170)) corridor = 'free';
+    let route = plan && corridor === 'route' ? plan : null;
+    if (!route) {
+      const fr = S.prefs.scenery !== false && MP.freeroad ? MP.freeroad.update(g, d) : null;
+      route = fr ? fr.route : plan && (d.off || 0) < 400 ? plan : null;   // the map does not know this street: the plan's world is the best there is nearby
+    }
+    if (!route) return null;                       // nothing to build a world from: the straight road along the GPS heading
+    const env = envFor(route); env.stale = !!d.stale;
+    const p = MP.livepose.shared.frame(g, env, now, dt);
+    if (!p) return null;
+    const onPlan = route === plan, along = p.along == null ? 0 : p.along;
+    return { ms: d.now || now, lat: p.lat, lng: p.lng, heading: ((p.psi * 180 / Math.PI) % 360 + 360) % 360, along, route, pose: { x: p.x, y: p.y, psi: p.psi, kind: p.kind },
+      speed: d.speedMps || 0, wx: MP.wxAt ? MP.wxAt(onPlan ? along : d.along || 0, d.now || now) : null, elevAt: onPlan ? MP.elevAt : null,
+      signs: onPlan && p.kind === 'route' ? D.signsAhead(along) : [], hy, noWorld: S.prefs.scenery === false, live: true };
+  }
+  function sceneState(dt) {
     const r = S.route, d = S.d, hy = D.vis ? D.vis.hy : 220;
+    if (S.trip && preview == null && S.gps.lat != null && MP.livepose && S.prefs.livecam !== false) { const ls = liveState(dt, hy); if (ls) return ls; }
     // No planned road under the car: a free drive, a car that has left its route, or one that drove on past its
     // destination. The route position would be a place the car is not (that was the "frozen road"), so the windshield
     // draws the real mapped street the car is on instead, with its real surroundings (freeroad.js).
@@ -253,12 +288,9 @@
     const pt = r.pointAt(along);
     return { ms, lat: pt.lat, lng: pt.lng, heading: pt.bearing, along, route: r, speed, wx: MP.wxAt ? MP.wxAt(along, ms) : null, elevAt: MP.elevAt, signs: D.signsAhead(along), hy, noWorld: S.prefs.scenery === false, live: !!S.trip || preview != null };
   }
-  /** what the camera and the car avatar need beyond the road itself: the view (chase is the default), brake lights from the GPS's own deceleration, paint */
-  function viewExtras() {
-    const g = S.gps, v = S.d.speedMps || 0;
-    return { chase: S.prefs.view !== 'cockpit', brake: !S.d.stale && v > 1.5 && (g.accel || 0) < -1.2, carPaint: S.prefs.carPaint || 'pearl' };
-  }
-  D.drawScene = function (dt) { const st = Object.assign(sceneState(), viewExtras()); scene.render(st, dt); D._sceneState = st; };
+  /** what the camera needs beyond the road itself: the view (chase is the default; the car model is retired for now, the position puck marks the car) */
+  function viewExtras() { return { chase: S.prefs.view !== 'cockpit' }; }
+  D.drawScene = function (dt) { const st = Object.assign(sceneState(dt), viewExtras()); scene.render(st, dt); D._sceneState = st; };
 
   /** things that decorate the road ahead: exit gantries, service and story signs */
   D.signsAhead = function (along) {
@@ -384,9 +416,13 @@
     nodes.tGps.classList.toggle('lit', S.gps.lock && !d.stale); nodes.tGps.classList.toggle('warn', !!S.trip && !(S.gps.lock && !d.stale));
     nodes.tObd.classList.toggle('lit', !!S.car.connected);
     // maneuver sign
-    const man = nodes.maneuver, stp = d.nextStep, showMan = !!(S.trip && stp && r);
+    const recalc = !!(S.trip && r && d.offRoute && !d.arrived), man = nodes.maneuver, stp = d.nextStep, showMan = !!(S.trip && r && (stp || recalc));
     if (man.hidden === showMan) { man.hidden = !showMan; D.layout(); }
-    if (showMan) {
+    if (showMan && recalc) {   // the car has left the planned road: the old turn means nothing, say what is happening
+      const svg = man.querySelector('.m-ico svg'); svg.firstChild.setAttribute('href', '#i-route'); svg.style.transform = '';
+      ui.setText(man.querySelector('.m-dist'), '—'); ui.setText(man.querySelector('.m-text'), 'Recalculating…'); ui.setText(man.querySelector('.m-then'), '');
+      man.classList.remove('approach');
+    } else if (showMan) {
       const ic = MP.Route.stepIcon(stp), svg = man.querySelector('.m-ico svg');
       svg.firstChild.setAttribute('href', '#i-' + ic.icon); svg.style.transform = 'rotate(' + ic.rot + 'deg)';
       ui.setText(man.querySelector('.m-dist'), d.stepDistM != null ? units.distLabel(d.stepDistM) : '');

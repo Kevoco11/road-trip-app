@@ -118,8 +118,7 @@
     let c = FR.cur, sn = null, good = false, left = 0;
     if (c) {
       sn = c.route.snap(gps.lat, gps.lng, c.hint); c.hint = sn.idx; left = c.route.total - sn.along;
-      const turn = heading != null && (gps.speed || 0) > 2 ? Math.abs(MP.util.angDiff(c.route.pointAt(sn.along).bearing, heading)) : 0;
-      good = sn.off < 22 && turn < 55 && left > 12;
+      good = sn.off < 90 && left > 12;   // the camera is free (livepose.js): every street within the corridor is drawn, so a turn inside it needs no new path
     }
     const wantNew = !c || !good || left < 350 || (left < 900 && W.version !== c.version);
     if (wantNew && now - lastTry > (good ? 2500 : 700)) {

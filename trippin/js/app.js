@@ -103,6 +103,15 @@
     // the adapter used last time: Android connects to it by itself as soon as it is in range (car on, adapter plugged in)
     if (S.prefs.obdAuto !== false && MP.obd && MP.obd.autoConnect) MP.obd.autoConnect();
 
+    // the live camera's gyroscope: the phone's yaw rate turns the picture between GPS fixes. It is ignored until it has agreed with the GPS on
+    // real turns (units and sign differ between phones); once it has, that calibration is remembered
+    if (MP.livepose) {
+      const lp = MP.livepose.shared, cal = MP.store.get('gyro', null);
+      if (cal && cal.trust === 1 && isFinite(cal.scale)) { lp.gyroScale = cal.scale; lp.gyroTrust = 1; }
+      lp.onCalibrate = (scale, trust) => { if (trust === 1) MP.store.set('gyro', { scale, trust, at: Date.now() }); if (MP.diag) MP.diag.push('gyro', (trust === 1 ? 'trusted, scale ' : 'distrusted, ratio ') + scale.toFixed(3)); };
+      MP.livepose.attachSensors(root);
+    }
+
     E.tick(Date.now());
     autoTheme();
     setInterval(() => { E.tick(Date.now()); autoTheme(); }, 1000);

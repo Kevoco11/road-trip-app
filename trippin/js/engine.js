@@ -43,7 +43,7 @@
 
   const E = (MP.engine = { S });
   let pace = new MP.PaceTracker();
-  let prevFix = null, headingAnchor = null, hint = null, offSince = 0, slowSince = 0, fastSince = 0, lastCrumb = 0, lastAltFilt = null;
+  let prevFix = null, headingAnchor = null, hint = null, offSince = 0, strongSince = 0, slowSince = 0, fastSince = 0, lastCrumb = 0, lastAltFilt = null;
   let awaySince = 0, beyondSince = 0;
   const ARRIVE_M = 45, ARRIVE_OFF_M = 70, BEYOND_M = 140;
   let driveFatigueSec = 0;
@@ -91,7 +91,7 @@
 
   /** forget the planned trip (back to "no destination"): the app still works as a free drive */
   function resetProgress() {
-    offSince = 0; awaySince = 0; beyondSince = 0;
+    offSince = 0; strongSince = 0; awaySince = 0; beyondSince = 0;
     Object.assign(S.d, { along: 0, snap: null, off: 0, offRoute: false, arrived: null, beyond: false, street: false });
   }
   E.clearRoute = function () {
@@ -112,7 +112,7 @@
       distM: 0, movingSec: 0, maxMps: 0, climbM: 0, nightM: 0, harsh: { brake: 0, accel: 0 }, fuelL: 0, fuelDistM: 0, speedSum: 0,
     };
     driveFatigueSec = 0; pace = new MP.PaceTracker(); slowSince = 0; fastSince = 0; lastCrumb = 0;
-    offSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
+    offSince = 0; strongSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
     if (MP.learn && S.route && !S.route.approx) MP.learn.apply(S.route, now);   // leaving now, not at the planned time
     E.logEvent('start', { lat: S.gps.lat, lng: S.gps.lng });
     bus.emit('trip', 'start');
@@ -126,7 +126,7 @@
     t.endedAt = now;
     E.logEvent('end', { lat: S.gps.lat, lng: S.gps.lng });
     S.trip = null;
-    offSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
+    offSince = 0; strongSince = 0; awaySince = 0; beyondSince = 0; Object.assign(S.d, { offRoute: false, arrived: null, beyond: false, street: false });
     bus.emit('trip', 'end', t);
     return t;
   };
@@ -181,9 +181,19 @@
       S.d.snap = sn; S.d.off = sn.off;
       // never let the progress jump backwards by more than GPS noise unless clearly re-routed
       S.d.along = (!S.trip || sn.along >= prevAlong - 120 || sn.off > 400) ? sn.along : prevAlong;
-      if (sn.off > 120) { if (!offSince) offSince = fix.ts; } else offSince = 0;
+      // Off the planned road is noticed as soon as the GPS can tell, not after a long walk. Two fixes in a row that are off the road AND pointing
+      // away from it (a wrong turn) start a re-route; so does simply being far from it, or driving against it (a U-turn), for three seconds.
+      const lim2 = Math.max(26, Math.min(48, (fix.acc || 0) * 2)), usable = fix.acc == null || fix.acc < 40;
+      let hdgAway = 0, against = false;
+      if (speed > 3 && g.heading != null) {
+        const rb = S.route.pointAt(sn.along).bearing; hdgAway = Math.abs(util.angDiff(rb, g.heading)); against = hdgAway > 135;   // facing back the way the plan came, on the road or beside it
+      }
+      const away = usable && (sn.off > 120 || (sn.off > lim2 && (hdgAway > 40 || sn.off > lim2 * 1.8)) || (against && !!S.trip));
+      const strong = usable && speed > 3 && sn.off > 8 && hdgAway > 55;      // already off it, and not even pointing along it
+      if (away) { if (!offSince) offSince = fix.ts; } else if (sn.off < lim2 * 0.7 && !against) offSince = 0;
+      if (strong) { if (!strongSince) strongSince = fix.ts; } else strongSince = 0;
       if (S.trip) trackRoute(S.route, sn, fix, speed);
-      S.d.offRoute = !S.d.arrived && !!offSince && fix.ts - offSince > 8000;
+      S.d.offRoute = !S.d.arrived && ((!!offSince && fix.ts - offSince > 3000) || (!!strongSince && fix.ts - strongSince > 900));
     }
 
     const t = S.trip;
